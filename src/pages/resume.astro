@@ -1,0 +1,121 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { site } from "../site.config";
+
+const title = "Resume";
+const description = `Resume of ${site.author}`;
+---
+
+<BaseLayout title={title} description={description}>
+  <article class="prose max-w-none">
+    <header class="mb-8 border-b border-[var(--color-border)] pb-8">
+      <h1 class="text-4xl font-extrabold mb-2">{site.author}</h1>
+      <p class="text-xl text-[var(--color-text-secondary)]">Software Engineer</p>
+      <div class="mt-4 flex flex-wrap gap-4 text-sm text-[var(--color-text-secondary)]">
+        <a href={`mailto:contact@${site.author.toLowerCase()}.com`} class="hover:text-[var(--color-accent)] transition-colors">
+            contact@{site.author.toLowerCase()}.com
+        </a>
+        <span>•</span>
+        <a href="https://github.com/Clickin" target="_blank" rel="noopener noreferrer" class="hover:text-[var(--color-accent)] transition-colors">
+            github.com/Clickin
+        </a>
+         <!-- Add more contact info here -->
+      </div>
+    </header>
+
+    <section class="mb-12">
+      <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">
+        <span class="text-[var(--color-accent)]">#</span> About
+      </h2>
+      <p class="leading-relaxed text-[var(--color-text-secondary)]">
+        Passionate software engineer with a focus on building scalable web applications. 
+        Experienced in modern frontend frameworks and backend technologies. 
+        Always eager to learn new things and solve complex problems.
+        <!-- Add your personal summary here -->
+      </p>
+    </section>
+
+    <section class="mb-12">
+      <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
+        <span class="text-[var(--color-accent)]">#</span> Experience
+      </h2>
+      
+      <div class="space-y-8">
+        <!-- Experience Item 1 -->
+        <div class="relative pl-8 border-l border-[var(--color-border)]">
+          <div class="absolute -left-[5px] top-2 w-2.5 h-2.5 rounded-full bg-[var(--color-accent)]"></div>
+          <h3 class="text-xl font-semibold">Senior Frontend Engineer</h3>
+          <div class="text-[var(--color-text-secondary)] mb-2">Tech Company A · 2023 - Present</div>
+          <ul class="list-disc list-outside ml-4 text-[var(--color-text-secondary)] space-y-1">
+            <li>Led the migration of legacy codebase to Next.js, improving performance by 40%.</li>
+            <li>Implemented a comprehensive design system used across 5 different products.</li>
+            <li>Mentored junior developers and conducted code reviews.</li>
+          </ul>
+        </div>
+
+        <!-- Experience Item 2 -->
+        <div class="relative pl-8 border-l border-[var(--color-border)]">
+           <div class="absolute -left-[5px] top-2 w-2.5 h-2.5 rounded-full bg-[var(--color-border)]"></div>
+          <h3 class="text-xl font-semibold">Software Developer</h3>
+          <div class="text-[var(--color-text-secondary)] mb-2">Startup B · 2021 - 2023</div>
+          <ul class="list-disc list-outside ml-4 text-[var(--color-text-secondary)] space-y-1">
+            <li>Developed and maintained key features for the main SaaS product.</li>
+            <li>Collaborated with product managers to define requirements and roadmap.</li>
+            <li>Optimized database queries, reducing API response time by 50%.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="mb-12">
+      <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
+         <span class="text-[var(--color-accent)]">#</span> Skills
+      </h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+              <h3 class="font-semibold mb-2 text-[var(--color-text)]">Languages</h3>
+              <div class="flex flex-wrap gap-2">
+                  <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">JavaScript / TypeScript</span>
+                  <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Python</span>
+                  <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Go</span>
+                  <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">SQL</span>
+              </div>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2 text-[var(--color-text)]">Frontend</h3>
+            <div class="flex flex-wrap gap-2">
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">React / Next.js</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Vue.js</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Astro</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Tailwind CSS</span>
+            </div>
+        </div>
+         <div>
+            <h3 class="font-semibold mb-2 text-[var(--color-text)]">Backend & Tools</h3>
+            <div class="flex flex-wrap gap-2">
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Node.js</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Docker</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">AWS</span>
+                <span class="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Git</span>
+            </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="mb-12">
+        <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
+           <span class="text-[var(--color-accent)]">#</span> Education
+        </h2>
+        <div class="space-y-6">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                <div>
+                    <h3 class="text-xl font-semibold">Computer Science, BS</h3>
+                    <div class="text-[var(--color-text-secondary)]">University Name</div>
+                </div>
+                <div class="text-[var(--color-text-secondary)] mt-1 sm:mt-0">2017 - 2021</div>
+            </div>
+        </div>
+    </section>
+
+  </article>
+</BaseLayout>

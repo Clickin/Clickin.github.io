@@ -1,0 +1,115 @@
+---
+layout: ../layouts/BaseLayout.astro
+title: Resume
+description: Resume of Clickin
+---
+
+import { site } from "../site.config";
+
+<article className="prose max-w-none">
+  <header className="mb-8 border-b border-[var(--color-border)] pb-8">
+    <h1 className="text-4xl font-extrabold mb-2">{site.author}</h1>
+    <p className="text-xl text-[var(--color-text-secondary)]">Software Engineer</p>
+    <div className="mt-4 flex flex-wrap gap-4 text-sm text-[var(--color-text-secondary)]">
+      <a href={`mailto:contact@${site.author.toLowerCase()}.com`} className="hover:text-[var(--color-accent)] transition-colors">
+          contact@{site.author.toLowerCase()}.com
+      </a>
+      <span>•</span>
+      <a href="https://github.com/Clickin" target="_blank" rel="noopener noreferrer" className="hover:text-[var(--color-accent)] transition-colors">
+          github.com/Clickin
+      </a>
+    </div>
+  </header>
+
+  <section className="mb-12">
+    <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+      <span className="text-[var(--color-accent)]">#</span> About
+    </h2>
+    <p className="leading-relaxed text-[var(--color-text-secondary)]">
+      Passionate software engineer with a focus on building scalable web applications. 
+      Experienced in modern frontend frameworks and backend technologies. 
+      Always eager to learn new things and solve complex problems.
+    </p>
+  </section>
+
+  <section className="mb-12">
+    <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+      <span className="text-[var(--color-accent)]">#</span> Experience
+    </h2>
+    
+    <div className="space-y-8">
+      <div className="relative pl-8 border-l border-[var(--color-border)]">
+        <div className="absolute -left-[5px] top-2 w-2.5 h-2.5 rounded-full bg-[var(--color-accent)]"></div>
+        <h3 className="text-xl font-semibold">Senior Frontend Engineer</h3>
+        <div className="text-[var(--color-text-secondary)] mb-2">Tech Company A · 2023 - Present</div>
+        <ul className="list-disc list-outside ml-4 text-[var(--color-text-secondary)] space-y-1">
+          <li>Led the migration of legacy codebase to Next.js, improving performance by 40%.</li>
+          <li>Implemented a comprehensive design system used across 5 different products.</li>
+          <li>Mentored junior developers and conducted code reviews.</li>
+        </ul>
+      </div>
+
+      <div className="relative pl-8 border-l border-[var(--color-border)]">
+         <div className="absolute -left-[5px] top-2 w-2.5 h-2.5 rounded-full bg-[var(--color-border)]"></div>
+        <h3 className="text-xl font-semibold">Software Developer</h3>
+        <div className="text-[var(--color-text-secondary)] mb-2">Startup B · 2021 - 2023</div>
+        <ul className="list-disc list-outside ml-4 text-[var(--color-text-secondary)] space-y-1">
+          <li>Developed and maintained key features for the main SaaS product.</li>
+          <li>Collaborated with product managers to define requirements and roadmap.</li>
+          <li>Optimized database queries, reducing API response time by 50%.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section className="mb-12">
+    <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+       <span className="text-[var(--color-accent)]">#</span> Skills
+    </h2>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+            <h3 className="font-semibold mb-2 text-[var(--color-text)]">Languages</h3>
+            <div className="flex flex-wrap gap-2">
+                <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">JavaScript / TypeScript</span>
+                <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Python</span>
+                <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Go</span>
+                <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">SQL</span>
+            </div>
+        </div>
+        <div>
+          <h3 className="font-semibold mb-2 text-[var(--color-text)]">Frontend</h3>
+          <div className="flex flex-wrap gap-2">
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">React / Next.js</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Vue.js</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Astro</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Tailwind CSS</span>
+          </div>
+      </div>
+       <div>
+          <h3 className="font-semibold mb-2 text-[var(--color-text)]">Backend & Tools</h3>
+          <div className="flex flex-wrap gap-2">
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Node.js</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Docker</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">AWS</span>
+              <span className="px-3 py-1 rounded-md bg-[var(--color-bg-secondary)] text-sm border border-[var(--color-border)]">Git</span>
+          </div>
+      </div>
+    </div>
+  </section>
+
+  <section className="mb-12">
+      <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+         <span className="text-[var(--color-accent)]">#</span> Education
+      </h2>
+      <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center">
+              <div>
+                  <h3 className="text-xl font-semibold">Computer Science, BS</h3>
+                  <div className="text-[var(--color-text-secondary)]">University Name</div>
+              </div>
+              <div className="text-[var(--color-text-secondary)] mt-1 sm:mt-0">2017 - 2021</div>
+          </div>
+      </div>
+  </section>
+
+</article>

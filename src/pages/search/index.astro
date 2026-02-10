@@ -1,0 +1,55 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+const base = import.meta.env.BASE_URL;
+const pagefindPath = `${base}pagefind/`;
+---
+<BaseLayout title="Search" description="블로그 글 검색">
+  <h1 class="text-3xl sm:text-4xl font-extrabold mb-6">Search</h1>
+  <div id="search" class="pagefind-container"></div>
+
+  <link href={`${pagefindPath}pagefind-ui.css`} rel="stylesheet" />
+  <script is:inline define:vars={{ pagefindPath }}>
+    function initPagefind() {
+      if (document.querySelector(".pagefind-ui__search-input")) return; // already initialized
+
+      const script = document.createElement("script");
+      script.src = pagefindPath + "pagefind-ui.js";
+      script.onload = function () {
+        new PagefindUI({
+          element: "#search",
+          bundlePath: pagefindPath,
+          showSubResults: true,
+          showImages: false,
+          translations: {
+            placeholder: "검색어를 입력하세요...",
+            zero_results: "[SEARCH_TERM]에 대한 검색 결과가 없습니다.",
+            many_results: "[COUNT]개의 결과를 찾았습니다.",
+            one_result: "1개의 결과를 찾았습니다.",
+            alt_search:
+              "[SEARCH_TERM] 대신 [DIFFERENT_TERM] 검색 결과를 보여드립니다.",
+            search_suggestion: "다른 검색어로 시도해 보세요.",
+          },
+        });
+
+        // "/" keyboard shortcut
+        var input = document.querySelector(".pagefind-ui__search-input");
+        if (input) {
+          window.addEventListener("keydown", function (e) {
+            if (e.key === "/" && document.activeElement !== input) {
+              e.preventDefault();
+              input.focus();
+            }
+          });
+        }
+      };
+      document.head.appendChild(script);
+    }
+
+    // Try immediately if DOM is ready, otherwise wait
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", initPagefind);
+    } else {
+      initPagefind();
+    }
+  </script>
+</BaseLayout>

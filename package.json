@@ -1,0 +1,26 @@
+{
+  "name": "clickin.github.io",
+  "type": "module",
+  "version": "0.6.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "prebuild": "node scripts/copy-post-assets.mjs",
+    "build": "astro build",
+    "postbuild": "pagefind --site dist",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.0.0",
+    "@astrojs/rss": "^4.0.0",
+    "@astrojs/sitemap": "^3.0.0",
+    "@tailwindcss/vite": "^4.1.18",
+    "astro": "^5.0.0",
+    "tailwindcss": "^4.1.18",
+    "unist-util-visit": "^5.0.0"
+  },
+  "devDependencies": {
+    "pagefind": "^1.4.0"
+  }
+}

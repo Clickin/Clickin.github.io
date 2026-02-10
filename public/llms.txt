@@ -1,0 +1,4 @@
+# llms.txt
+Site: Dev Blog
+Purpose: Developer notes.
+Key sections: /blog /search /rss.xml

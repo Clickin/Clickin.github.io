@@ -1,0 +1,70 @@
+---
+title: "Getting Started"
+description: "블로그 설치, 실행, 배포 가이드"
+date: 2026-02-10
+category: "guide"
+tags: ["astro", "github-pages", "pnpm"]
+draft: false
+---
+
+## 요구 사항
+
+- **Node.js** 20 이상
+- **pnpm** 9 이상
+
+## 설치 및 실행
+
+```bash
+# 리포지토리 클론
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+
+# 의존성 설치
+pnpm install
+
+# 개발 서버 시작
+pnpm dev
+```
+
+브라우저에서 `http://localhost:4321`을 열면 블로그가 표시됩니다.
+
+## 새 포스트 작성
+
+`src/content/posts/` 디렉토리 아래에 새 폴더를 만들고 `index.mdx` 파일을 추가합니다:
+
+```
+src/content/posts/
+  └── 2026-02-10-my-first-post/
+      ├── index.mdx      ← 포스트 내용
+      └── screenshot.png  ← 포스트 내 이미지 (선택)
+```
+
+프론트매터 예시:
+
+```yaml
+---
+title: "My First Post"
+description: "포스트 설명"
+date: 2026-02-10
+category: "dev"
+tags: ["javascript", "tutorial"]
+draft: false
+---
+```
+
+## GitHub Pages 배포
+
+리포지토리를 GitHub에 push하면 `.github/workflows/deploy-pages.yml` 워크플로가 자동으로 실행됩니다.
+
+GitHub 리포지토리 설정에서:
+
+1. **Settings** → **Pages** → Source를 **GitHub Actions**로 선택
+2. `main` 브랜치에 push하면 자동 배포
+
+## 커스터마이징
+
+| 파일 | 설명 |
+|---|---|
+| `src/site.config.ts` | 블로그 제목, 설명, 작성자 |
+| `src/styles/global.css` | 테마 색상 커스터마이징 |
+| `public/og-default.svg` | OG 이미지 |

@@ -1,0 +1,12 @@
+---
+import { site as siteCfg } from "../site.config";
+const { title, description, canonical } = Astro.props;
+const pageTitle = title ? `${title} — ${siteCfg.title}` : siteCfg.title;
+const canonicalUrl = canonical ?? Astro.url.href;
+---
+<meta name="description" content={description ?? siteCfg.description} />
+<link rel="canonical" href={canonicalUrl} />
+<meta property="og:title" content={pageTitle} />
+<meta property="og:description" content={description ?? siteCfg.description} />
+<meta property="og:url" content={canonicalUrl} />
+<meta property="og:image" content={new URL("/og-default.svg", Astro.site ?? canonicalUrl).href} />

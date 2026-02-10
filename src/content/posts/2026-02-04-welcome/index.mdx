@@ -1,0 +1,49 @@
+---
+title: "Welcome to Dev Blog"
+description: "이 블로그의 기술 스택과 구조를 소개합니다."
+date: 2026-02-04
+category: "meta"
+tags: ["astro", "mdx", "tailwind"]
+draft: false
+---
+
+## 블로그 소개
+
+이 블로그는 개인 개발 노트와 기술 문서를 정리하기 위해 만들어졌습니다.
+Astro + MDX를 기반으로 정적 사이트를 생성하고, GitHub Pages로 배포합니다.
+
+## 기술 스택
+
+| 기술 | 역할 |
+|---|---|
+| **Astro** | 정적 사이트 생성 |
+| **MDX** | Markdown + JSX 컴포넌트 |
+| **Tailwind CSS v4** | 유틸리티 기반 스타일링 |
+| **GitHub Pages** | 배포 |
+
+## 기능
+
+- 🌓 **라이트/다크 테마** — 시스템 설정에 맞추어 자동 전환, 사용자 선택 저장
+- 🔍 **클라이언트 검색** — 빌드 시 JSON 인덱스 생성, 즉시 검색
+- 📰 **RSS 피드** — `/rss.xml`
+- 🗺️ **사이트맵** — 자동 생성
+- 🤖 **`llms.txt`** — LLM 친화적 사이트 설명
+
+## 코드 블록 예시
+
+```typescript
+import { defineConfig } from "astro/config";
+import mdx from "@astrojs/mdx";
+
+export default defineConfig({
+  integrations: [mdx()],
+});
+```
+
+> MDX를 사용하면 Markdown 안에서 React 컴포넌트를 사용할 수 있습니다.
+
+## 다음 단계
+
+1. `src/site.config.ts`에서 블로그 제목과 작성자 이름을 수정합니다
+2. `src/content/posts/` 디렉토리에 새 포스트를 추가합니다
+3. `pnpm dev`로 로컬에서 확인 후 `main` 브랜치에 push하면 자동 배포됩니다

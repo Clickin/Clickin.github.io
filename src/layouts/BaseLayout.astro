@@ -1,0 +1,38 @@
+---
+import "../styles/global.css";
+import Header from "../components/Header.astro";
+import SeoHead from "../components/SeoHead.astro";
+import { site as siteCfg } from "../site.config";
+const { title, description, canonical } = Astro.props;
+---
+<!doctype html>
+<html lang={siteCfg.language}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <title>{title ? `${title} — ${siteCfg.title}` : siteCfg.title}</title>
+    <SeoHead title={title} description={description} canonical={canonical} />
+    <!-- Inline theme init to prevent FOUC -->
+    <script is:inline>
+      (function(){
+        var t=localStorage.getItem("theme");
+        if(t==="dark"||(t!=="light"&&window.matchMedia("(prefers-color-scheme:dark)").matches)){
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-screen flex flex-col">
+    <Header />
+    <main class="container-blog flex-1 py-8">
+      <slot />
+    </main>
+    <footer class="container-blog py-8 text-center text-sm text-[var(--color-text-secondary)] border-t border-[var(--color-border)]">
+      &copy; {new Date().getFullYear()} {siteCfg.author}. Built with
+      <a href="https://astro.build" class="text-[var(--color-link)] hover:text-[var(--color-link-hover)]">Astro</a>.
+    </footer>
+  </body>
+</html>

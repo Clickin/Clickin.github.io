@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+/* ─── Theme tokens ─── */
+@theme {
+  --color-bg: #ffffff;
+  --color-bg-secondary: #f6f8fa;
+  --color-bg-code: #f0f2f5;
+  --color-text: #1f2328;
+  --color-text-secondary: #656d76;
+  --color-border: #d1d9e0;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-link: #2563eb;
+  --color-link-hover: #1d4ed8;
+  --color-tag-bg: #dbeafe;
+  --color-tag-text: #1e40af;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* ─── Dark mode overrides ─── */
+.dark {
+  --color-bg: #0d1117;
+  --color-bg-secondary: #161b22;
+  --color-bg-code: #1c2128;
+  --color-text: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-border: #30363d;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-link: #58a6ff;
+  --color-link-hover: #79c0ff;
+  --color-tag-bg: #1c3a5f;
+  --color-tag-text: #79c0ff;
+}
+
+/* ─── Base ─── */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-[var(--color-bg)] text-[var(--color-text)] font-sans antialiased;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* ── Links ── */
+  a {
+    @apply text-[var(--color-link)] underline decoration-[var(--color-link)]/30 underline-offset-2 transition-colors duration-150 hover:text-[var(--color-link-hover)] hover:decoration-[var(--color-link-hover)]/60;
+  }
+
+  /* ── Headings ── */
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-bold tracking-tight text-[var(--color-text)];
+  }
+
+  h1 {
+    @apply text-3xl sm:text-4xl;
+  }
+
+  h2 {
+    @apply text-2xl sm:text-3xl mt-10 mb-4;
+  }
+
+  h3 {
+    @apply text-xl sm:text-2xl mt-8 mb-3;
+  }
+
+  h4 {
+    @apply text-lg sm:text-xl mt-6 mb-2;
+  }
+
+  /* ── Prose content ── */
+  article p {
+    @apply my-4 leading-7 text-[var(--color-text-secondary)];
+  }
+
+  article ul,
+  article ol {
+    @apply my-4 pl-6 space-y-1 text-[var(--color-text-secondary)];
+  }
+
+  article ul {
+    @apply list-disc;
+  }
+
+  article ol {
+    @apply list-decimal;
+  }
+
+  article li {
+    @apply leading-7;
+  }
+
+  article blockquote {
+    @apply border-l-4 border-[var(--color-accent)] pl-4 my-6 italic text-[var(--color-text-secondary)];
+  }
+
+  article hr {
+    @apply border-[var(--color-border)] my-8;
+  }
+
+  article img {
+    @apply rounded-lg my-6 max-w-full;
+  }
+
+  /* ── Code ── */
+  code {
+    @apply font-mono text-sm bg-[var(--color-bg-code)] px-1.5 py-0.5 rounded;
+  }
+
+  pre {
+    @apply bg-[var(--color-bg-code)] rounded-lg p-4 my-6 overflow-x-auto border border-[var(--color-border)];
+  }
+
+  pre code {
+    @apply bg-transparent p-0 rounded-none;
+  }
+
+  /* ── Table ── */
+  article table {
+    @apply w-full my-6 text-sm border-collapse;
+  }
+
+  article th {
+    @apply text-left px-3 py-2 border-b-2 border-[var(--color-border)] font-semibold;
+  }
+
+  article td {
+    @apply px-3 py-2 border-b border-[var(--color-border)];
+  }
+}
+
+/* ─── Pagefind UI theme ─── */
+.pagefind-container {
+  --pagefind-ui-scale: 1;
+  --pagefind-ui-primary: var(--color-accent);
+  --pagefind-ui-text: var(--color-text);
+  --pagefind-ui-background: var(--color-bg-secondary);
+  --pagefind-ui-border: var(--color-border);
+  --pagefind-ui-tag: var(--color-tag-bg);
+  --pagefind-ui-border-width: 1px;
+  --pagefind-ui-border-radius: 12px;
+  --pagefind-ui-image-border-radius: 8px;
+  --pagefind-ui-image-box-ratio: 3 / 2;
+  --pagefind-ui-font: var(--font-sans);
+}
+
+/* Override inner elements for better theme fit */
+.pagefind-ui__search-input {
+  font-weight: 400 !important;
+}
+
+.pagefind-ui__result-link {
+  color: var(--color-text) !important;
+}
+
+.pagefind-ui__result-link:hover {
+  color: var(--color-accent) !important;
+}
+
+.pagefind-ui__result-excerpt {
+  color: var(--color-text-secondary) !important;
+}
+
+/* ─── Utilities ─── */
+@layer utilities {
+  .container-blog {
+    @apply max-w-3xl mx-auto px-4 sm:px-6;
+  }
+}
