@@ -1,0 +1,425 @@
+---
+title: "Spring Boot에서 Micronaut으로: 메시지 서버 마이그레이션"
+description: "Spring Boot 기반 메시지 서버를 Micronaut으로 마이그레이션하며 적용한 Virtual Threads, GC 최적화, 메트릭 통합 경험을 공유합니다."
+date: 2026-02-12
+category: "project"
+tags: ["java", "micronaut", "spring-boot", "virtual-threads", "migration", "prometheus"]
+draft: false
+---
+
+## 마이그레이션 배경
+
+레거시 프레임워크 위에서 돌아가던 TCP 메시지 서버를 현대적인 스택으로 다시 작성해야 할 시점이 왔다. 기존 서버는 XML 기반 의존성 주입, iBatis ORM, Ant 빌드로 구성되어 있었고 유지보수와 배포가 점점 어려워지고 있었다.
+
+마이그레이션 대상 프레임워크를 선택할 때 Spring Boot와 Micronaut을 비교했다. 최종적으로 Micronaut 4를 선택한 이유는 다음과 같다.
+
+**시작 시간과 메모리 사용량.** 이 서버는 병원 환경에서 상시 구동되는 TCP 서버로, 장애 발생 시 빠른 재시작이 필수적이다. Micronaut은 compile-time DI를 사용하여 Spring Boot 대비 훨씬 빠른 시작 시간을 보인다. GraalVM Native Image로 빌드하면 1초 이내에 시작할 수 있었다.
+
+**GraalVM Native Image 지원.** Micronaut은 설계 단계부터 GraalVM을 고려했기 때문에 reflection 설정이 최소화된다. Spring Boot도 Native Image를 지원하지만, 서드파티 라이브러리의 reflection 설정이 훨씬 복잡했다.
+
+**Netty 기반 아키텍처.** 이 서버의 핵심은 바이너리 프로토콜을 사용하는 TCP 서버이다. Micronaut이 내부적으로 Netty를 사용하므로 Netty pipeline을 직접 구성하는 것이 자연스러웠다.
+
+기존과 신규 스택을 비교하면 다음과 같다.
+
+| 항목 | 기존 (Legacy) | 신규 (Micronaut) |
+|------|--------------|-----------------|
+| Framework | 자체 프레임워크 | Micronaut 4.10 + Netty |
+| DI | XML 기반 | Annotation 기반 (compile-time) |
+| ORM | iBatis | Micronaut Data JDBC |
+| Build | Ant | Gradle 9.1 |
+| Java | JDK 8 | JDK 25 |
+| Logging | Log4j | Logback |
+
+
+## Java 25 Virtual Threads 활용
+
+이 서버는 1초마다 데이터베이스를 폴링하여 미전송 메시지를 가져온 뒤 접속 중인 클라이언트에게 배포하는 구조이다. 핵심 문제는 JDBC 호출이 blocking이라는 점이었다. 기존에는 Reactor 기반의 비동기 처리를 시도했으나, 코드 복잡도가 급격히 올라가서 유지보수가 어려웠다.
+
+Java 25의 Virtual Threads를 적용하면서 blocking JDBC를 직접 호출하되, platform thread를 차단하지 않는 패턴을 사용할 수 있게 되었다.
+
+### Scheduler에서 Virtual Thread로 오프로드
+
+메시지 배포의 진입점은 `@Scheduled`로 1초마다 호출되는 메서드이다. 이 메서드가 platform thread에서 실행되므로, blocking 작업을 virtual thread로 즉시 위임한다.
+
+```java
+@Scheduled(fixedDelay = "1s", initialDelay = "5s")
+public void distribute() {
+    // Scheduler의 platform thread를 블로킹하지 않고
+    // virtual thread에서 JDBC 작업 수행
+    Thread.startVirtualThread(this::doDistribute);
+}
+
+private void doDistribute() {
+    // 이 메서드는 virtual thread에서 실행된다.
+    // blocking JDBC 호출이 안전하다.
+    List<Message> messages = messageService.findUnsentMessages();
+    messages.forEach(this::processMessage);
+}
+```
+
+이 패턴의 핵심은 `Thread.startVirtualThread()`가 즉시 반환된다는 점이다. Scheduler thread는 다음 주기까지 자유로워지고, 실제 DB 폴링은 virtual thread에서 독립적으로 진행된다.
+
+### On-Demand Virtual Thread로 메시지 큐 처리
+
+각 세션(클라이언트 연결)은 독립적인 메시지 큐를 가진다. 큐에 메시지가 들어오면 virtual thread를 생성하여 순차 전송하고, 큐가 비면 virtual thread가 자연스럽게 종료된다.
+
+```java
+public void queueMessage(AbstractMessageData message) {
+    boolean wasEmpty = messageQueue.isEmpty();
+    messageQueue.offer(message);
+
+    // 큐가 비어있었다면 새 virtual thread 시작
+    if (wasEmpty && queueProcessorRunning.compareAndSet(false, true)) {
+        Thread.ofVirtual().start(this::processMessageQueue);
+    }
+}
+
+private void processMessageQueue() {
+    try {
+        AbstractMessageData message;
+        while ((message = messageQueue.poll()) != null && channel.isActive()) {
+            channel.writeAndFlush(message);
+            Thread.sleep(50); // 클라이언트 파싱 간격 확보
+        }
+    } finally {
+        queueProcessorRunning.set(false);
+    }
+}
+```
+
+이 on-demand 패턴은 불필요한 스레드 생성을 방지한다. 메시지가 있을 때만 virtual thread가 존재하고, 처리가 끝나면 자동으로 사라진다. `AtomicBoolean`으로 동시에 하나의 processor만 실행되도록 보장한다.
+
+### Virtual Thread Scheduler 설정
+
+Micronaut 설정에서 I/O executor와 scheduled executor 모두 virtual thread를 활성화했다.
+
+```yaml
+micronaut:
+  executors:
+    io:
+      type: fixed
+      virtual: true
+    scheduled:
+      type: scheduled
+      core-pool-size: 2
+      virtual: true
+```
+
+JVM 옵션으로 carrier thread 수를 조정했다. 이 서버는 I/O 비중이 95% 이상이므로 carrier thread를 적게 유지해도 충분하다.
+
+```bash
+-Djdk.virtualThreadScheduler.parallelism=8
+-Djdk.virtualThreadScheduler.maxPoolSize=128
+```
+
+### Reactor에서 Virtual Thread로의 전환 효과
+
+Reactor 기반 코드와 Virtual Thread 기반 코드를 비교하면 가독성 차이가 극명하다.
+
+```java
+// Before: Reactor 기반 (복잡한 비동기 체인)
+Mono.fromCallable(() -> repository.findUnsent())
+    .subscribeOn(Schedulers.boundedElastic())
+    .flatMapMany(Flux::fromIterable)
+    .flatMap(msg -> Mono.fromCallable(() -> sendMessage(msg))
+        .subscribeOn(Schedulers.boundedElastic()))
+    .subscribe();
+
+// After: Virtual Thread 기반 (동기 코드처럼 작성)
+Thread.startVirtualThread(() -> {
+    List<Message> messages = repository.findUnsent();
+    messages.forEach(this::sendMessage);
+});
+```
+
+코드가 단순해졌을 뿐 아니라, 에러 핸들링도 try-catch로 자연스럽게 처리할 수 있다. Reactor의 `onErrorResume`, `onErrorReturn` 체인이 사라졌다.
+
+
+## SessionInfo GC 최적화
+
+### 문제: 동일 사용자 ID의 중복 String 객체
+
+TCP 서버 특성상 수백 개의 동시 연결이 유지된다. 같은 사용자가 여러 PC에서 접속하면 동일한 userId String이 각 SessionInfo 객체에 별도로 생성된다. 이 String들이 Old Generation으로 승격되면 GC 부담이 늘어난다.
+
+### 해결: String.intern()으로 중복 제거
+
+```java
+public void setUserId(String userId) {
+    // intern()으로 동일 문자열 인스턴스 공유
+    // 여러 세션에서 같은 사용자가 로그인해도 하나의 String 인스턴스만 사용
+    this.userId = userId != null ? userId.intern() : null;
+    this.loginTime = LocalDateTime.now();
+}
+```
+
+`String.intern()`은 JVM의 String Pool에 문자열을 등록하고 기존 인스턴스를 반환한다. 동일 사용자의 다중 로그인 세션이 하나의 String 객체를 공유하게 되어 Old Generation의 중복 객체가 제거된다.
+
+### IP 주소 파싱 최적화
+
+Netty의 `Channel.remoteAddress()`는 호출할 때마다 문자열을 생성한다. 팝업 알림의 IP 기반 중복 방지 로직에서 반복 호출이 문제가 될 수 있어, 생성 시점에 한 번만 파싱하여 캐싱했다.
+
+```java
+public class SessionInfo {
+    private final String remoteAddress;
+    private final String ipAddress; // 생성자에서 한 번만 파싱
+
+    public SessionInfo(Channel channel, MessageService messageService) {
+        this.remoteAddress = channel.remoteAddress() != null
+            ? channel.remoteAddress().toString() : "unknown";
+        this.ipAddress = parseIpAddress(this.remoteAddress);
+    }
+
+    private static String parseIpAddress(String remoteAddress) {
+        if (remoteAddress == null || "unknown".equals(remoteAddress)) {
+            return remoteAddress;
+        }
+        String addr = remoteAddress.startsWith("/")
+            ? remoteAddress.substring(1) : remoteAddress;
+        int colonIndex = addr.indexOf(':');
+        return colonIndex > 0 ? addr.substring(0, colonIndex) : addr;
+    }
+}
+```
+
+### GC 전략 선택: Serial GC
+
+이 서버의 힙 크기는 50MB 미만이다. 이 규모에서는 G1 GC나 ZGC 같은 대규모 GC가 오히려 오버헤드를 유발한다. 벤치마크 결과 Serial GC가 모든 지표에서 최적이었다.
+
+| GC | GC 오버헤드 | 메모리 사용 | Pause Time | Throughput |
+|----|-----------|-----------|------------|------------|
+| Serial | 0.5% | 45MB | 1-10ms | 최고 |
+| G1 | 1.2% | 78MB | 10-50ms | 중간 |
+| ZGC | 2.0% | 120MB | < 10ms | 낮음 |
+
+Native Image 빌드에서는 `--gc=serial` 옵션으로, JVM 모드에서는 `-XX:+UseSerialGC`로 설정한다. 작은 힙에서는 단순한 GC가 가장 효율적이라는 원칙을 다시 확인했다.
+
+
+## Prometheus 메트릭 통합
+
+### Micronaut Micrometer 설정
+
+Micronaut은 Micrometer를 통한 메트릭 수집을 기본 지원한다. Prometheus registry를 추가하면 `/prometheus` 엔드포인트로 메트릭이 노출된다.
+
+```groovy
+// build.gradle.kts
+dependencies {
+    implementation("io.micronaut.micrometer:micronaut-micrometer-core")
+    implementation("io.micronaut.micrometer:micronaut-micrometer-registry-prometheus")
+}
+```
+
+```yaml
+# application.yml
+micronaut:
+  metrics:
+    enabled: true
+    export:
+      prometheus:
+        enabled: true
+        step: PT1M
+
+endpoints:
+  prometheus:
+    enabled: true
+    sensitive: false
+```
+
+### 커스텀 데이터베이스 메트릭
+
+TCP 서버의 핵심 모니터링 대상은 데이터베이스 연결 상태이다. 커스텀 메트릭 클래스를 만들어 쿼리 성공/실패, 재시도 횟수, 연결 풀 상태를 추적한다.
+
+```java
+@Singleton
+public class DatabaseMetrics {
+
+    private final Counter querySuccessCounter;
+    private final Counter queryFailureCounter;
+    private final Counter retryAttemptCounter;
+    private final Timer queryTimer;
+
+    public DatabaseMetrics(MeterRegistry registry,
+                           DatabaseHealthTracker healthTracker) {
+        this.querySuccessCounter = Counter.builder("msgsvr.db.query.success")
+            .description("Successful database queries")
+            .register(registry);
+
+        this.queryFailureCounter = Counter.builder("msgsvr.db.query.failure")
+            .description("Failed database queries")
+            .register(registry);
+
+        this.retryAttemptCounter = Counter.builder("msgsvr.db.retry.attempts")
+            .description("Database retry attempts")
+            .register(registry);
+
+        this.queryTimer = Timer.builder("msgsvr.db.query.duration")
+            .description("Database query duration")
+            .register(registry);
+
+        // 연속 실패 횟수를 Gauge로 노출
+        Gauge.builder("msgsvr.db.consecutive.failures",
+                healthTracker::getConsecutiveFailures)
+            .register(registry);
+
+        // DB 건강 상태 (1=healthy, 0=unhealthy)
+        Gauge.builder("msgsvr.db.health",
+                () -> healthTracker.isHealthy() ? 1.0 : 0.0)
+            .register(registry);
+    }
+}
+```
+
+### Health Check와 연결 풀 자동 복구
+
+데이터베이스 연결이 끊어졌을 때 자동으로 감지하고 연결 풀을 리셋하는 구조를 구현했다. `DatabaseHealthTracker`가 연속 실패 횟수를 추적하고, 임계치를 넘으면 HikariCP 연결 풀을 soft reset한다.
+
+이 상태는 Prometheus Gauge로 실시간 노출되므로, Grafana 대시보드에서 DB 연결 장애를 즉시 파악할 수 있다.
+
+관리 엔드포인트는 별도 포트(12345)에서 운영하여 TCP 서버 포트와 분리했다.
+
+
+## TCP 서버 테스트 전략
+
+TCP 기반 서버를 테스트하는 것은 HTTP 서버 테스트보다 까다롭다. 실제 소켓 연결이 필요하고, 바이너리 프로토콜을 직접 인코딩/디코딩해야 한다.
+
+### 계층별 테스트 분리
+
+테스트를 세 계층으로 분리했다.
+
+**1. 단위 테스트 (DirectTest).** Micronaut context 없이 순수 Java 객체만으로 테스트한다. Mock 객체를 직접 주입하여 빠르게 실행된다.
+
+```java
+// SessionManagerDirectTest - Micronaut context 불필요
+class SessionManagerDirectTest {
+    private SessionManager sessionManager;
+    private MessageService mockMessageService;
+
+    @BeforeEach
+    void setUp() {
+        mockMessageService = mock(MessageService.class);
+        sessionManager = new SessionManager(mockMessageService);
+    }
+
+    @Test
+    void shouldRegisterAndRemoveChannel() {
+        Channel mockChannel = createMockChannel();
+        sessionManager.addChannel(mockChannel);
+        assertNotNull(sessionManager.getSession(mockChannel));
+
+        sessionManager.removeChannel(mockChannel);
+        assertNull(sessionManager.getSession(mockChannel));
+    }
+}
+```
+
+**2. 통합 테스트 (MicronautTest).** `@MicronautTest`로 전체 DI context를 로드하고, H2 인메모리 DB를 사용하여 실제 Repository 동작을 검증한다.
+
+```java
+@MicronautTest(propertySources = "classpath:application-test.yml")
+class GlobalMessageDistributorVirtualThreadTest {
+    @Inject
+    MessageService realMessageService;
+
+    @Test
+    void distribute_shouldNotBlockWhenJdbcIsSlow() throws InterruptedException {
+        // JDBC가 느려도 distribute()는 즉시 반환되어야 한다
+        when(mockMessageService.findUnsentMessages()).thenAnswer(invocation -> {
+            Thread.sleep(500); // 느린 DB 시뮬레이션
+            return new ArrayList<>();
+        });
+
+        long startTime = System.currentTimeMillis();
+        distributor.distribute();
+        long duration = System.currentTimeMillis() - startTime;
+
+        assertThat(duration).isLessThan(50); // 50ms 이내 반환
+    }
+}
+```
+
+**3. TCP 서버 테스트.** 실제 Netty 클라이언트로 서버에 소켓 연결을 수행한다. 랜덤 포트를 사용하여 테스트 간 충돌을 방지한다.
+
+```java
+class ClientTcpServerTest {
+    private int testPort;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        testPort = findAvailablePort();
+        System.setProperty("msgsvr.client.port", String.valueOf(testPort));
+        clientTcpServer = new ClientTcpServer(mockClientHandler);
+    }
+
+    @Test
+    void shouldAcceptMultipleClientConnections() throws Exception {
+        clientTcpServer.startServer();
+        CountDownLatch connected = new CountDownLatch(10);
+
+        // 실제 Netty 클라이언트로 TCP 연결
+        Bootstrap bootstrap = new Bootstrap()
+            .group(new NioEventLoopGroup())
+            .channel(NioSocketChannel.class)
+            .handler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void channelActive(ChannelHandlerContext ctx) {
+                            connected.countDown();
+                            ctx.close();
+                        }
+                    });
+                }
+            });
+
+        for (int i = 0; i < 10; i++) {
+            bootstrap.connect("localhost", testPort);
+        }
+
+        assertThat(connected.await(10, TimeUnit.SECONDS)).isTrue();
+    }
+}
+```
+
+### 테스트 격리를 위한 resetAll()
+
+SessionManager에 `resetAll()` 메서드를 추가하여 테스트 간 상태를 완전히 초기화한다. 이 메서드는 모든 큐 프로세서를 중지하고, 채널 맵과 사용자 맵을 클리어한다.
+
+### testAll 커스텀 태스크
+
+Micronaut의 테스트 필터링은 `@MicronautTest` 어노테이션이 없는 DirectTest 클래스를 건너뛸 수 있다. 이를 해결하기 위해 Gradle에 `testAll` 커스텀 태스크를 만들어 `*DirectTest` 패턴의 클래스를 명시적으로 실행하고, JaCoCo 커버리지 리포트를 통합했다.
+
+
+## 마이그레이션 회고
+
+### 잘된 점
+
+**프로토콜 완전 호환.** 25바이트 헤더 바이너리 프로토콜을 Netty codec으로 정확히 구현하여 기존 클라이언트를 수정하지 않고 서버만 교체할 수 있었다. 이것이 마이그레이션의 가장 큰 성공 요인이었다.
+
+**시작 시간 개선.** GraalVM Native Image로 빌드 시 1초 이내 시작이 가능해졌다. JVM 모드에서도 Micronaut의 compile-time DI 덕분에 Spring Boot 대비 빠른 시작을 보였다.
+
+**메모리 사용량 감소.** Native Image의 메모리 사용량은 JVM 대비 약 70% 감소했다. JVM 모드에서도 Serial GC + 작은 힙 설정으로 45-58MB 수준을 유지했다.
+
+**코드 단순화.** Reactor 기반 비동기 코드를 Virtual Thread 기반 동기 코드로 전환하면서 코드량이 줄고 가독성이 높아졌다. CompletableFuture 체인이나 Mono/Flux 조합이 사라지고 평범한 try-catch 블록으로 대체되었다.
+
+### 어려웠던 점
+
+**GraalVM Native Image와 Oracle JDBC.** Oracle JDBC 드라이버는 내부적으로 대량의 reflection과 동적 클래스 로딩을 사용한다. Native Image 빌드 시 `--initialize-at-build-time` 옵션으로 Oracle i18n 관련 클래스를 하나씩 등록해야 했다. 특히 한국어 문자셋(EUC-KR, KO16MSWIN949 등) 관련 클래스가 누락되면 런타임에 `ClassNotFoundException`이 발생했다.
+
+**EUC-KR 인코딩 호환.** 관리 콘솔은 레거시 호환을 위해 EUC-KR 인코딩을 사용한다. Netty의 기본 인코딩은 UTF-8이므로, AdminProtocolEncoder/Decoder에서 명시적으로 EUC-KR charset을 지정해야 했다.
+
+**Micronaut의 테스트 필터링.** `@MicronautTest`를 사용하지 않는 순수 단위 테스트가 기본 `test` 태스크에서 누락되는 문제가 있었다. `testAll` 커스텀 태스크와 `testComplete` 통합 태스크를 만들어 해결했다.
+
+**HikariCP 연결 풀과 Virtual Thread.** Virtual thread는 수천 개의 동시 실행이 가능하므로, 연결 풀 크기가 병목이 될 수 있다. HikariCP의 `maximum-pool-size`를 30으로 늘리고, virtual thread에서 연결을 기다리는 시간을 모니터링하여 적정 값을 찾았다.
+
+### 성능 수치
+
+최종 운영 환경에서 측정한 성능 수치는 다음과 같다.
+
+| 항목 | 기존 | 신규 (JVM) | 신규 (Native) |
+|------|------|-----------|--------------|
+| 시작 시간 | ~15초 | ~3초 | < 1초 |
+| 메모리 사용 | ~200MB | 45-58MB | ~40MB |
+| GC 오버헤드 | 미측정 | < 1% | < 0.5% |
+| Native Image 크기 | - | - | 129MB |
+
+마이그레이션의 본질은 프레임워크 교체가 아니라 프로토콜 호환성을 유지하면서 운영 효율성을 개선하는 것이었다. Micronaut + Netty + Virtual Threads 조합이 이 목표에 잘 부합했다.

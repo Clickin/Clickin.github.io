@@ -1,0 +1,18 @@
+---
+interface Props {
+  title: string;
+  company: string;
+  date: string;
+}
+
+const { title, company, date } = Astro.props;
+---
+
+<div class="relative pl-8 border-l border-[var(--color-border)]">
+  <div class="absolute -left-[5px] top-2 w-2.5 h-2.5 rounded-full bg-[var(--color-accent)]"></div>
+  <h3 class="text-xl font-semibold">{title}</h3>
+  <div class="text-[var(--color-text-secondary)] mb-2">{company} · {date}</div>
+  <div class="prose max-w-none text-[var(--color-text-secondary)]">
+    <slot />
+  </div>
+</div>

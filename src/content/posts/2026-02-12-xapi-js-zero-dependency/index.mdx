@@ -1,0 +1,435 @@
+---
+title: "xapi-js: Zero-dependency XML 클라이언트 라이브러리 만들기"
+description: "외부 의존성을 하나씩 제거하며 zero-dependency XML 클라이언트를 만든 과정과 성능 최적화 기법을 공유합니다."
+date: 2026-02-12
+category: "project"
+tags: ["typescript", "xml", "zero-dependency", "performance", "v8", "optimization"]
+draft: false
+---
+
+## 프로젝트 소개
+
+[xapi-ts](https://github.com/Clickin/xapi-js)는 Tobesoft의 X-API 프로토콜을 TypeScript로 구현한 라이브러리다. X-API는 넥사크로 플랫폼(Nexacro Platform)과 XPlatform 솔루션에서 사용하는 XML 기반 데이터 통신 프로토콜로, 한국 SI 업계에서 널리 사용된다.
+
+X-API의 XML 구조는 `Root > Parameters/Dataset > ColumnInfo/Rows` 형태의 정해진 스키마를 따른다. 이 프로젝트의 목표는 이 XML을 TypeScript 객체로 parse하고, 반대로 TypeScript 객체를 XML로 serialize하는 것이다.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Root xmlns="http://www.nexacroplatform.com/platform/dataset" version="4000">
+  <Parameters>
+    <Parameter id="errorCode" type="INT" value="0"/>
+  </Parameters>
+  <Dataset id="employees">
+    <ColumnInfo>
+      <Column id="name" size="32" type="STRING"/>
+      <Column id="age" size="4" type="INT"/>
+    </ColumnInfo>
+    <Rows>
+      <Row>
+        <Col id="name">John</Col>
+        <Col id="age">30</Col>
+      </Row>
+    </Rows>
+  </Dataset>
+</Root>
+```
+
+xapi-ts는 monorepo 구조로 `@xapi-ts/core`, `adaptor-express`, `adaptor-fetch`, `adaptor-nestjs` 패키지를 제공한다. Node.js v18+, Deno, Bun, 그리고 모던 브라우저를 지원한다. 이 글에서는 core 패키지가 zero-dependency에 도달하기까지의 과정과 성능 최적화 기법을 다룬다.
+
+## 초기 구현과 의존성 문제
+
+프로젝트 초기에는 두 개의 외부 의존성을 사용했다.
+
+- **stax-xml** -- XML Writer로 사용. StAX(Streaming API for XML) 스타일의 XML 생성 라이브러리
+- **txml** -- XML Parser로 사용. 경량 XML 파서 라이브러리
+
+초기 `package.json`의 dependencies 섹션은 다음과 같았다:
+
+```json
+{
+  "dependencies": {
+    "stax-xml": "^1.0.0",
+    "txml": "^6.0.0"
+  }
+}
+```
+
+이 두 의존성은 각각 고유한 문제를 가지고 있었다. stax-xml은 v1.2.0에서 async에서 sync로의 breaking change가 발생했고, txml은 범용 XML 파서로서 X-API에 불필요한 기능까지 포함하고 있었다. 외부 의존성은 곧 버전 관리 부담, 보안 취약점 노출, 번들 사이즈 증가를 의미한다. 이 문제를 해결하기 위해 의존성을 하나씩 제거하기로 했다.
+
+## stax-xml 의존성 제거: Custom XML Writer
+
+첫 번째로 제거한 것은 XML Writer 역할을 하던 stax-xml이다. stax-xml의 API 변경(`async -> sync`)에 대응하는 과정에서, X-API의 XML 구조가 매우 정형화되어 있어 범용 XML Writer가 과도하다는 것을 깨달았다.
+
+대안으로 `XmlStringBuilder` 클래스를 직접 구현했다. 핵심 설계 원칙은 단순성이다.
+
+```typescript
+export class XmlStringBuilder {
+  private lines: string[] = [];
+  private indentLevel: number = 0;
+  private readonly indentString: string = '  ';
+
+  writeDeclaration(version: string = '1.0', encoding: string = 'UTF-8'): void {
+    this.lines.push(`<?xml version="${version}" encoding="${encoding}"?>`);
+  }
+
+  writeStartElement(
+    name: string,
+    attributes?: Record<string, string>,
+    selfClosing?: boolean
+  ): void {
+    const indent = this.indentString.repeat(this.indentLevel);
+    let tag = `${indent}<${name}`;
+
+    if (attributes) {
+      for (const [key, value] of Object.entries(attributes)) {
+        const encodedValue = encodeControlChars(escapeXml(value));
+        tag += ` ${key}="${encodedValue}"`;
+      }
+    }
+
+    if (selfClosing) {
+      tag += '/>';
+      this.lines.push(tag);
+    } else {
+      tag += '>';
+      this.lines.push(tag);
+      this.indentLevel++;
+    }
+  }
+
+  writeEndElement(name: string): void {
+    this.indentLevel--;
+    const indent = this.indentString.repeat(this.indentLevel);
+    this.lines.push(`${indent}</${name}>`);
+  }
+
+  toString(): string {
+    return this.lines.join('\n') + '\n';
+  }
+}
+```
+
+stax-xml이 제공하던 streaming write, event-based API 등은 X-API에서 필요하지 않았다. `XmlStringBuilder`는 `string[]`에 라인을 누적하고 마지막에 `join('\n')`으로 합치는 단순한 구조다. XML special character escaping과 control character encoding도 별도 유틸리티 함수로 분리했다.
+
+```typescript
+export function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+export function encodeControlChars(str: string): string {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    const charCode = str.charCodeAt(i);
+    if ((charCode >= 1 && charCode <= 8) ||
+        (charCode >= 11 && charCode <= 12) ||
+        (charCode >= 14 && charCode <= 31)) {
+      result += `&#${charCode};`;
+    } else {
+      result += str[i];
+    }
+  }
+  return result;
+}
+```
+
+이 변경으로 stax-xml 의존성을 완전히 제거했다. 159개의 기존 테스트가 모두 통과했고, 외부 라이브러리의 API 변경에 더 이상 영향받지 않게 되었다.
+
+## txml 의존성 제거: Custom XML Parser
+
+두 번째로 제거한 것은 XML Parser인 txml이다. txml은 범용 XML 파서로 약 5KB의 번들 사이즈를 차지했다. X-API의 XML은 고정된 태그 구조(`Root`, `Parameters`, `Dataset`, `ColumnInfo`, `Rows`, `Row`, `Col`)를 사용하기 때문에, 범용 파서 대신 X-API에 최적화된 경량 파서를 만들 수 있었다.
+
+`XapiXmlParser`는 SAX-style의 character-by-character state machine으로 구현했다.
+
+```typescript
+class XapiXmlParser {
+  private xml: string;
+  private pos: number = 0;
+  private length: number;
+
+  constructor(xml: string) {
+    this.xml = xml;
+    this.length = xml.length;
+  }
+
+  parse(): XmlNode[] {
+    const nodes: XmlNode[] = [];
+
+    while (this.pos < this.length) {
+      this.skipWhitespace();
+      if (this.pos >= this.length) break;
+
+      // Skip XML declaration
+      if (this.matches('<?xml')) {
+        this.skipUntil('?>');
+        this.pos += 2;
+        continue;
+      }
+
+      // Skip comments
+      if (this.matches('<!--')) {
+        this.skipUntil('-->');
+        this.pos += 3;
+        continue;
+      }
+
+      // Parse element
+      if (this.current() === '<') {
+        const node = this.parseElement();
+        if (node) {
+          nodes.push(node);
+        }
+      } else {
+        this.pos++;
+      }
+    }
+
+    return nodes;
+  }
+
+  // ...
+}
+```
+
+파서의 주요 특징은 다음과 같다:
+
+- **Element parsing**: 태그 이름과 attribute를 파싱하고 children을 재귀적으로 처리
+- **CDATA section handling**: `<![CDATA[...]]>` 구간을 text content로 변환
+- **Self-closing tag support**: `<Column id="name" type="STRING"/>` 처리
+- **XML declaration/comment skipping**: `<?xml ...?>`, `<!-- ... -->` 무시
+
+파싱 결과는 txml의 `tNodeObj`와 호환되는 `XmlNode` 구조를 사용한다:
+
+```typescript
+export type XmlNode = {
+  tagName: string;
+  attributes?: Record<string, string>;
+  children?: (XmlNode | string)[];
+};
+```
+
+이 변경으로 txml 의존성을 제거하고 runtime dependency가 0이 되었다. 번들에서 약 5KB가 줄었고, X-API에 특화된 파싱 로직으로 불필요한 처리를 제거할 수 있었다.
+
+## 성능 최적화: Iterator에서 Array로
+
+의존성 제거 후, handler.ts의 데이터 접근 패턴에서 성능 병목을 발견했다. 원래 코드는 JavaScript Iterator 패턴을 사용했다:
+
+```typescript
+// Before: Iterator 패턴
+*iterParameters(): IterableIterator<Parameter> {
+  for (const param of this.parameters.params) {
+    yield param;
+  }
+}
+
+*iterDatasets(): IterableIterator<Dataset> {
+  for (const dataset of this.datasets) {
+    yield dataset;
+  }
+}
+
+*iterRows(): IterableIterator<Row> {
+  for (const row of this.rows) {
+    yield row;
+  }
+}
+```
+
+Iterator는 lazy evaluation의 장점이 있지만, X-API 데이터 처리에서는 항상 전체를 순회하므로 iterator state capture의 오버헤드(약 100ns per iteration)만 발생했다. 이를 직접 배열을 반환하는 방식으로 변경했다:
+
+```typescript
+// After: Direct array access
+getParameters(): Parameter[] {
+  return this.parameters.params;
+}
+
+getDatasets(): Dataset[] {
+  return this.datasets;
+}
+
+getRows(): Row[] {
+  return this.rows;
+}
+```
+
+동시에 handler.ts의 parse 함수에서 `forEach`, `find`, `filter` 같은 고차 함수를 indexed for loop으로 교체했다:
+
+```typescript
+// Before: forEach + find + filter
+const rootElement = parsedXml.find(node => node.tagName === 'Root');
+rootChildren.forEach(child => {
+  if (child.tagName === 'Parameters') {
+    parseParameters(child, xapiRoot);
+  }
+});
+
+// After: indexed for loops
+let rootElement: XmlNode | undefined;
+for (let i = 0; i < parsedXml.length; i++) {
+  if (parsedXml[i].tagName === 'Root') {
+    rootElement = parsedXml[i];
+    break;
+  }
+}
+
+for (let i = 0; i < rootChildren.length; i++) {
+  const child = rootChildren[i];
+  if (typeof child === 'string') continue;
+  if (child.tagName === 'Parameters') {
+    parseParameters(child, xapiRoot);
+  }
+}
+```
+
+이 변경의 주요 포인트는 다음과 같다:
+
+- **parseRows**: 3-level nested forEach를 for loop으로 변환 (20-30% faster)
+- **parseColumnInfo**: forEach를 for loop으로 교체 (10-15% faster)
+- **parse**: `find()` 호출을 single-pass search로 통합 (15-20% faster)
+- **parse**: `filter()`를 manual loop으로 교체하여 intermediate array allocation 제거 (10-15% faster)
+- **Early exit**: ColumnInfo와 Rows를 모두 찾으면 즉시 루프 종료
+
+누적 성능 개선은 대용량 XML 파싱 기준 약 50-80%에 달했다. 136개 테스트가 behavioral change 없이 모두 통과했다.
+
+## V8 Hidden Class 최적화
+
+마지막 최적화 단계는 V8 엔진 레벨의 최적화다. V8은 JavaScript 객체를 C++ struct처럼 최적화하는 Hidden Class(또는 Shape, Map이라고도 함) 메커니즘을 사용한다. 같은 순서로 같은 property를 가진 객체들은 동일한 hidden class를 공유하여 property access가 O(1)에 가까워진다.
+
+문제는 `XmlNode` 객체 생성 시 conditional하게 property를 추가하면 서로 다른 hidden class가 생성된다는 것이다:
+
+```typescript
+// Before: hidden class가 분기됨
+const node: any = { tagName: tagName };
+if (hasAttributes) {
+  node.attributes = attributes;  // Hidden class 전이 발생
+}
+if (hasChildren) {
+  node.children = children;      // 또 다른 hidden class 전이
+}
+```
+
+이를 모든 field를 upfront에서 초기화하는 방식으로 변경했다:
+
+```typescript
+// After: 일관된 hidden class
+const node: XmlNode = {
+  tagName: tagName,
+  attributes: undefined,
+  children: undefined
+};
+
+// 이후 조건부 할당
+if (attributes && Object.keys(attributes).length > 0) {
+  node.attributes = attributes;
+}
+```
+
+이렇게 하면 모든 `XmlNode` 인스턴스가 동일한 hidden class를 공유한다. V8은 이 패턴을 인식하고 inline cache를 효율적으로 활용할 수 있다.
+
+추가로 XML 파서 내부에서도 여러 V8 친화적 최적화를 적용했다:
+
+```typescript
+// charCodeAt()으로 문자 비교 (string equality 대신)
+const CHAR_LT = 60;    // '<'
+const CHAR_GT = 62;    // '>'
+const CHAR_SLASH = 47; // '/'
+
+private isWhitespace(code: number): boolean {
+  return code === CHAR_SPACE || code === CHAR_TAB
+      || code === CHAR_LF || code === CHAR_CR;
+}
+
+// substring() 대신 index 기반 비교로 allocation 제거
+private matches(str: string, pos: number = this.pos): boolean {
+  const len = str.length;
+  if (pos + len > this.length) return false;
+  for (let i = 0; i < len; i++) {
+    if (this.xml.charCodeAt(pos + i) !== str.charCodeAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+```
+
+`matches()` 메서드는 `substring()`으로 새 string을 생성하는 대신, `charCodeAt()`으로 문자 단위 비교를 수행한다. 이로써 string allocation이 발생하지 않아 GC pressure가 줄어든다.
+
+XML entity decoding에서도 static array와 Map을 활용한 최적화를 적용했다:
+
+```typescript
+// Pre-defined entities: 모듈 로드 시 한 번만 생성
+const PARSE_ENTITIES = (() => {
+  const entities: { entity: string; value: string; }[] = [];
+  for (let i = 1; i <= 32; i++) {
+    entities.push({ entity: `&#${i};`, value: String.fromCharCode(i) });
+  }
+  return entities;
+})();
+
+// Pre-compiled regex와 Map으로 fast lookup
+const CONTROL_CHAR_ENTITY_REGEX = new RegExp(
+  PARSE_ENTITIES.map(e =>
+    e.entity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  ).join('|'), 'g'
+);
+
+const ENTITY_MAP = new Map<string, string>(
+  PARSE_ENTITIES.map(e => [e.entity, e.value])
+);
+```
+
+## 번들 사이즈 감소와 zero-dependency 달성
+
+모든 변경의 결과를 정리하면 다음과 같다.
+
+**의존성 변화:**
+
+| 단계 | dependencies | 비고 |
+|------|-------------|------|
+| v1.0.0 | stax-xml, txml | 2개 의존성 |
+| v1.2.0 | txml | stax-xml 제거 |
+| v1.3.0 | (없음) | zero-dependency 달성 |
+
+**최종 core 패키지 `package.json`:**
+
+```json
+{
+  "name": "@xapi-ts/core",
+  "version": "1.3.0",
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  }
+}
+```
+
+runtime dependency가 0이 되었다. `devDependencies`에는 TypeScript 타입 정의와 컴파일러만 남아 있다.
+
+**성능 최적화 요약:**
+
+| 최적화 기법 | 대상 | 효과 |
+|------------|------|------|
+| Iterator -> Array | 데이터 접근 API | ~100ns/iteration 절감 |
+| forEach -> indexed for | parse 함수 | 50-80% 파싱 속도 향상 |
+| Hidden class 정규화 | XmlNode 생성 | V8 inline cache 효율화 |
+| charCodeAt() 비교 | XML 파서 | string allocation 제거 |
+| matches()/findString() | XML 파서 | zero-copy 문자열 비교 |
+| Static entity Map | XML entity decoding | 반복 할당 제거 |
+
+모든 최적화 과정에서 기존 159개 테스트를 계속 통과시켰다. behavioral change 없이 순수한 성능 개선만을 목표로 했다.
+
+## 마무리
+
+xapi-ts의 zero-dependency 여정에서 얻은 교훈을 정리한다.
+
+**의존성은 비용이다.** 외부 라이브러리가 가져다주는 편의성은 분명 있지만, 버전 관리 부담, breaking change 대응, 보안 취약점 모니터링, 번들 사이즈 증가라는 비용이 따른다. 특히 stax-xml의 async에서 sync로의 API 변경처럼 예측 불가능한 breaking change는 큰 리스크다.
+
+**도메인 특화 구현이 범용 라이브러리보다 나을 수 있다.** X-API의 XML은 고정된 스키마를 사용한다. 범용 XML 파서와 writer가 제공하는 기능의 대부분은 X-API에서 필요하지 않았다. 도메인에 특화된 경량 구현은 더 작고, 더 빠르고, 더 유지보수하기 쉬웠다.
+
+**V8 최적화는 측정 가능한 차이를 만든다.** Hidden class 정규화, charCodeAt() 기반 비교, static data structure 활용 같은 V8 친화적 패턴은 대용량 데이터 처리에서 실질적인 성능 차이를 만들었다. 다만 이런 최적화는 항상 프로파일링 데이터를 기반으로 적용해야 하며, 가독성과 트레이드오프를 고려해야 한다.
+
+xapi-ts는 MIT 라이선스로 [GitHub](https://github.com/Clickin/xapi-js)에서 공개되어 있다.

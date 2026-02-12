@@ -1,0 +1,370 @@
+---
+title: "StAX-XML: JavaScript에 StAX 스타일 XML 파싱을 가져오다"
+description: "왜 JavaScript 생태계에 pull-based XML 파서가 필요했는가? stax-xml 프로젝트의 동기와 설계 철학, 그리고 개발 과정을 돌아봅니다."
+date: 2026-02-12
+category: "project"
+tags: ["typescript", "xml", "parser", "npm", "open-source"]
+draft: false
+---
+
+## 문제의 시작: 97MB XML 파일과의 조우
+
+2024년 여름, 레거시 시스템에서 생성한 97MB짜리 XML 로그 파일을 분석해야 하는 상황이 생겼다. Node.js 환경에서 흔히 쓰는 `xml2js`로 파싱을 시도했지만, 메모리 부족 오류가 발생했다. `fast-xml-parser`로 전환했더니 파싱은 됐지만 151MB의 메모리를 사용했고, 프로세스 전체가 답답하게 느려졌다.
+
+Java로 동일한 작업을 할 때는 StAX를 사용해 수 MB의 메모리만으로 GB급 XML을 처리했던 경험이 있었다. "JavaScript에는 왜 StAX 같은 스트리밍 파서가 없을까?"라는 의문이 프로젝트의 출발점이 되었다.
+
+## JavaScript XML 생태계의 한계
+
+당시 JavaScript XML 라이브러리들은 크게 세 가지 패러다임으로 나뉘었다:
+
+### 1. DOM-based 파서 (예: xmldom)
+
+```typescript
+const dom = new DOMParser().parseFromString(xmlString);
+const elements = dom.getElementsByTagName('item');
+```
+
+- **장점**: W3C 표준 API, 브라우저와 동일한 사용법
+- **단점**: 전체 문서를 메모리에 올려야 함, 대용량 파일 처리 불가
+
+### 2. Push-based 파서 (예: sax-js)
+
+```typescript
+const parser = require('sax').parser();
+parser.onopentag = (node) => {
+  // 이벤트 핸들러 등록 방식
+};
+parser.write(xmlString);
+```
+
+- **장점**: 스트리밍 지원, 메모리 효율적
+- **단점**: 콜백 기반이라 제어 흐름이 역전됨, 상태 관리가 복잡
+
+### 3. 일괄 변환 파서 (예: xml2js, fast-xml-parser)
+
+```typescript
+const result = await parseStringPromise(xmlString);
+// 전체 문서를 한 번에 객체로 변환
+```
+
+- **장점**: 간편한 API, 사용하기 쉬움
+- **단점**: 메모리 사용량이 원본 XML 크기에 비례, 대용량 처리 불가
+
+세 가지 모두 나름의 장점이 있지만, **"필요한 부분만 선택적으로 파싱하면서도 제어 흐름은 내가 관리하고 싶다"**는 요구사항을 만족시키지 못했다.
+
+## Pull-based 파싱: 잃어버린 패러다임
+
+Java 세계에서 StAX(Streaming API for XML)는 2004년부터 표준으로 자리잡았다. StAX는 push-based SAX와 달리 애플리케이션이 파서를 "당겨서(pull)" 필요한 만큼만 읽는 방식이다.
+
+```java
+// Java StAX 예시
+XMLStreamReader reader = factory.createXMLStreamReader(inputStream);
+while (reader.hasNext()) {
+  int event = reader.next(); // 애플리케이션이 제어권을 가짐
+  if (event == XMLStreamConstants.START_ELEMENT) {
+    if (reader.getLocalName().equals("price")) {
+      String price = reader.getElementText(); // 필요한 부분만 읽음
+    }
+  }
+}
+```
+
+**핵심 차이점**:
+
+- **Push (SAX)**: 파서가 주도권을 가지고 이벤트를 밀어줌 → 콜백 지옥
+- **Pull (StAX)**: 애플리케이션이 주도권을 가지고 필요할 때 당겨옴 → 자연스러운 제어 흐름
+
+JavaScript에도 이런 방식이 있어야 하지 않을까? 그게 stax-xml 프로젝트의 핵심 동기였다.
+
+## 설계 철학: 세 가지 원칙
+
+### 1. Iterator 기반 Pull 모델
+
+JavaScript의 Iterator 프로토콜을 활용하면 StAX 스타일의 pull-based API를 자연스럽게 구현할 수 있다.
+
+```typescript
+const parser = new StaxXmlParserSync(xmlString);
+for (const event of parser) {
+  if (event.type === 'START_ELEMENT' && event.name === 'price') {
+    const text = parser.getElementText(); // 내가 원할 때 읽음
+  }
+}
+```
+
+Generator가 아닌 명시적 State Machine으로 구현하여 성능도 확보했다. (이 부분은 [최적화 포스트](../2026-02-12-stax-xml-optimization)에서 자세히 다룬다)
+
+### 2. 스트리밍 우선 설계
+
+대용량 파일 처리가 핵심 use case였으므로, 처음부터 `ReadableStream` 기반으로 설계했다.
+
+```typescript
+// 97MB 파일도 수 MB 메모리로 처리
+const fileStream = Bun.file('large.xml').stream();
+const parser = new StaxXmlParser(fileStream);
+
+for await (const event of parser) {
+  // 이벤트 단위로 순차 처리
+}
+```
+
+비동기 파서(`StaxXmlParser`)와 동기 파서(`StaxXmlParserSync`)를 별도 클래스로 분리하여 각각 최적화했다.
+
+### 3. Web Standard API만 사용
+
+Node.js, Bun, Deno, 브라우저 모두에서 동작하려면 플랫폼 종속 API를 피해야 한다.
+
+```typescript
+// Node.js Buffer 대신 Web Standard
+interface ParserOptions {
+  encoding?: 'utf-8' | 'utf-16'; // TextDecoder API
+  stream?: ReadableStream<Uint8Array>; // Streams API
+}
+```
+
+Zero dependency로 유지하며, 번들 크기도 최소화했다.
+
+## 개발 과정의 주요 고민들
+
+### 고민 1: Converter API 설계
+
+단순 파서만으로는 부족했다. 사용자가 XML 스키마를 선언적으로 정의하고, 타입 안전하게 파싱할 수 있어야 했다. Zod의 API에서 영감을 받아 체이너블한 스키마 빌더를 설계했다.
+
+```typescript
+import { x } from 'stax-xml/converter';
+
+const bookSchema = x.object({
+  title: x.string().xpath('/book/title'),
+  author: x.string().xpath('/book/author'),
+  price: x.number().xpath('/book/price'),
+  tags: x.string().array().xpath('/book/tags/tag')
+});
+
+// TypeScript 타입 추론 자동 작동
+type Book = Infer<typeof bookSchema>;
+// { title: string; author: string; price: number; tags: string[] }
+
+const result = await bookSchema.parse(xml);
+```
+
+**핵심 설계 결정**:
+
+- XPath 표현식으로 요소 선택 (직관적)
+- `.optional()`, `.transform()`, `.array()` 체이너블 메서드
+- TypeScript 타입 추론 완벽 지원
+- XML → Object뿐만 아니라 Object → XML 쓰기도 지원
+
+### 고민 2: 중첩 배열 파싱의 복잡도
+
+초기 구현에서 중첩 배열(예: `<books><book><authors><author>`)을 파싱할 때 O(n²) 복잡도가 발생했다. 각 요소마다 모든 스키마를 다시 활성화했기 때문이다.
+
+`XmlParsingStateMachine`에 "scope stack" 개념을 도입하여 O(n)으로 최적화했다. 스코프가 닫힐 때만 상위 스키마를 재활성화하는 방식이다.
+
+```typescript
+// Before: 모든 이벤트마다 전체 스키마 순회
+onEndElement(event) {
+  for (const schema of allSchemas) { // O(n²)
+    schema.reactivate();
+  }
+}
+
+// After: 스코프 기반 선택적 활성화
+onEndElement(event) {
+  const scope = this.scopeStack.pop();
+  scope.schemas.forEach(s => s.reactivate()); // O(1)
+}
+```
+
+### 고민 3: 동기 vs 비동기 API
+
+처음에는 비동기 파서만 구현했다. 하지만 사용자들이 작은 XML 문자열을 파싱할 때도 `await`를 써야 하는 게 불편하다는 피드백이 있었다.
+
+```typescript
+// 비동기만 있을 때 - 작은 문자열도 await 필요
+const result = await parse(smallXml);
+
+// 동기 파서 추가 후 - 더 자연스러움
+const result = parseSync(smallXml);
+```
+
+결국 `StaxXmlParserSync`를 별도로 구현했고, 코어 파싱 로직은 두 클래스에서 공유하도록 리팩터링했다.
+
+### 고민 4: 양방향 변환 (Write API)
+
+파싱만 하는 라이브러리는 많지만, 객체를 다시 XML로 변환하는 기능까지 제공하는 라이브러리는 드물다. 하지만 실무에서는 XML을 읽어서 수정하고 다시 쓰는 시나리오가 흔하다.
+
+Converter API에 `.write()` 메서드를 추가했다:
+
+```typescript
+const newBook = {
+  title: 'New Book',
+  author: 'Jane Doe',
+  price: 39.99,
+  tags: ['fiction', 'bestseller']
+};
+
+const xml = await bookSchema.write(newBook, {
+  rootElement: 'book',
+  indent: true
+});
+```
+
+내부적으로는 `StaxXmlWriterSync` 클래스가 스키마 정의를 역방향으로 해석하여 XML을 생성한다.
+
+## 개발 과정의 실패들
+
+### 실패 1: Generator 기반 초기 구현
+
+처음에는 `function*`과 `yield`로 파서를 구현했다. 코드는 깔끔했지만 성능 측정 결과 Generator overhead가 심각했다.
+
+```typescript
+// 아름답지만 느린 코드
+function* parse(xml: string) {
+  yield { type: 'START_DOCUMENT' };
+  // ...
+  yield { type: 'START_ELEMENT', name: 'book' };
+}
+```
+
+결국 명시적 State Machine으로 전환하여 20.67%의 성능 향상을 얻었다. ([최적화 포스트](../2026-02-12-stax-xml-optimization) 참고)
+
+### 실패 2: XPath 전체 구현 시도
+
+초기에는 XPath 1.0 전체를 구현하려 했다. 하지만 `preceding-sibling::`, `ancestor::` 같은 축은 스트리밍 파서와 근본적으로 맞지 않는다는 걸 깨달았다.
+
+결국 "순방향 선택만 가능한 XPath 서브셋"으로 축소했다:
+
+- ✅ 지원: `/book/title`, `//author`, `/book/tags/tag`
+- ❌ 미지원: `preceding-sibling::`, `parent::`, `ancestor::`
+
+실용적 타협이었지만, 실무에서는 거의 문제가 되지 않았다.
+
+### 실패 3: SAX 호환 레이어
+
+초기에 "SAX 방식으로도 쓸 수 있게 하자"며 호환 레이어를 만들었다. 하지만 이는 StAX의 장점을 포기하는 것이었고, 코드만 복잡해졌다.
+
+결국 SAX 호환 레이어는 제거하고, pull-based API에만 집중하기로 했다. 명확한 정체성이 더 중요했다.
+
+## 현재 상태와 성과
+
+### NPM 패키지 퍼블리싱
+
+stax-xml은 현재 v0.5.2로 NPM에 퍼블리싱되어 있다.
+
+```bash
+npm install stax-xml
+```
+
+- CommonJS와 ES Module 모두 지원
+- TypeScript 타입 정의 포함
+- Zero dependency
+- 번들 크기: ~45KB (minified)
+
+### 벤치마크 결과 요약
+
+**97MB 파일 파싱**:
+
+| 라이브러리 | 시간 | 메모리 |
+|---|---|---|
+| stax-xml | 4.36s | **2.66 MB** |
+| fast-xml-parser | 4.25s | 151.81 MB |
+| txml | 1.05s | 179.81 MB |
+
+stax-xml은 fast-xml-parser와 비슷한 속도지만 **메모리는 57배 적게** 사용한다.
+
+**2KB 파일 파싱**:
+
+| 라이브러리 | 시간 |
+|---|---|
+| stax-xml | 85.79 µs |
+| xml2js | 147.45 µs |
+| fast-xml-parser | 101.11 µs |
+
+작은 파일에서도 경쟁력 있는 성능을 보인다.
+
+### 테스트 커버리지
+
+- 전체 796개 테스트 (단위 테스트 + 통합 테스트)
+- Edge case 집중 테스트: CDATA, entity, namespace, self-closing 태그
+- CI/CD에서 매 커밋마다 실행
+
+## 기대효과와 활용 사례
+
+### 1. 대용량 로그 파일 분석
+
+```typescript
+// 수백 MB XML 로그에서 에러만 추출
+const parser = new StaxXmlParser(fileStream);
+for await (const event of parser) {
+  if (event.type === 'START_ELEMENT' && event.name === 'error') {
+    const errorMsg = parser.getElementText();
+    console.log(errorMsg);
+  }
+}
+```
+
+메모리 사용량이 일정하게 유지되어 GB급 파일도 처리 가능하다.
+
+### 2. 선택적 데이터 추출
+
+```typescript
+// 전체 문서를 파싱하지 않고 필요한 부분만 추출
+const priceSchema = x.number().xpath('/catalog/book[1]/price');
+const firstBookPrice = await priceSchema.parse(xml);
+```
+
+불필요한 파싱 비용을 건너뛸 수 있다.
+
+### 3. 스트리밍 변환 파이프라인
+
+```typescript
+// XML → 객체 → 필터링 → 다시 XML
+const books = await bookSchema.parseArray(inputStream);
+const filtered = books.filter(b => b.price < 30);
+const outputXml = await bookSchema.writeArray(filtered);
+```
+
+대용량 데이터 변환에서 메모리 효율적이다.
+
+### 4. 서버리스 환경
+
+메모리 제약이 있는 AWS Lambda, Cloudflare Workers 같은 환경에서 특히 유용하다.
+
+```typescript
+// Lambda에서 S3 XML 파싱 - 메모리 제한 128MB도 OK
+const response = await fetch(s3Url);
+const parser = new StaxXmlParser(response.body);
+```
+
+## 앞으로의 계획
+
+### 1. 성능 최적화 지속
+
+- SIMD 활용 실험 (Wasm 모듈)
+- Incremental parsing 지원
+- Worker 기반 병렬 파싱
+
+### 2. 기능 확장
+
+- XML Namespace 고급 지원 강화
+- DTD 검증 (optional)
+- XPath 2.0 일부 기능 추가
+
+### 3. 생태계 통합
+
+- Zod와의 직접 통합 (`z.xml()`)
+- React/Vue에서 쓸 수 있는 hooks
+- CLI 도구 제공
+
+## 마치며
+
+stax-xml은 "JavaScript에도 StAX가 있으면 좋겠다"는 단순한 바람에서 시작했다. 6개월간의 개발 과정에서 수많은 시행착오가 있었지만, 결국 **제어 흐름은 개발자가, 메모리 효율은 파서가** 책임지는 라이브러리를 만들 수 있었다.
+
+대용량 XML 처리로 고민하는 분들께 조금이나마 도움이 되길 바란다. 코드는 [GitHub](https://github.com/Clickin/stax-xml)에, 문서는 [공식 사이트](https://clickin.github.io/stax-xml/)에 공개되어 있다.
+
+```bash
+npm install stax-xml
+```
+
+---
+
+*이 프로젝트의 성능 최적화 과정은 [별도 포스트](../2026-02-12-stax-xml-optimization)에서 자세히 다룹니다.*

@@ -5,3 +5,5 @@ dist
 .env
 .env.*
 public/posts/
+.claude/
+nul

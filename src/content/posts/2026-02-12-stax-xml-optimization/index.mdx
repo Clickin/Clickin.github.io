@@ -1,0 +1,370 @@
+---
+title: "StAX-XML: JavaScript XML 파서 성능 최적화 여정"
+description: "Java StAX에서 영감받은 pull-based XML 파서의 성능 최적화 과정을 코드 레벨에서 살펴봅니다."
+date: 2026-02-12
+category: "project"
+tags: ["typescript", "xml", "performance", "npm", "optimization"]
+draft: false
+---
+
+## 프로젝트 소개
+
+[stax-xml](https://github.com/Clickin/stax-xml)은 Java의 StAX(Streaming API for XML)에서 영감받은 고성능 pull-based XML 파서다. DOM 파서가 전체 문서를 메모리에 올리는 것과 달리, StAX 방식은 이벤트 단위로 XML을 순차 처리하여 메모리 효율이 높다. 기존 JavaScript XML 라이브러리들(xml2js, fast-xml-parser)이 push-based 또는 전체 파싱 방식을 채택한 반면, stax-xml은 JavaScript 생태계 최초로 StAX 스타일의 pull-based 파싱을 구현했다.
+
+핵심 설계 목표는 세 가지였다:
+
+- **스트리밍 처리**: 97MB 이상의 대용량 XML도 수 MB 이내의 메모리로 파싱
+- **범용 호환**: Web Standard API만 사용하여 Node.js, Bun, Deno, 브라우저 모두 지원
+- **양방향 변환**: XML을 객체로 파싱하고, 객체를 다시 XML로 출력
+
+프로젝트는 비동기 스트림 파서(`StaxXmlParser`)와 동기 문자열 파서(`StaxXmlParserSync`), 그리고 Zod 스타일의 선언적 Converter API라는 세 축으로 구성된다.
+
+## Converter API: 선언적 XML 파싱
+
+stax-xml의 가장 큰 차별점은 Converter API다. Zod에서 영감받은 스키마 기반 선언적 API로, 타입 안전한 XML 파싱과 쓰기를 모두 지원한다.
+
+```typescript
+import { x } from 'stax-xml/converter';
+
+const bookSchema = x.object({
+  title: x.string().xpath('/book/title'),
+  author: x.string().xpath('/book/author'),
+  price: x.number().xpath('/book/price'),
+  tags: x.string().array().xpath('/book/tags/tag')
+});
+
+// XML -> Object
+const result = await bookSchema.parse(xml);
+// { title: 'TypeScript Deep Dive', author: 'John Smith',
+//   price: 29.99, tags: ['programming', 'typescript'] }
+
+// Object -> XML
+const newXml = await bookSchema.write(result, { rootElement: 'book' });
+```
+
+XPath 표현식으로 요소를 선택하고, `.optional()`, `.transform()`, `.array()` 같은 체이너블 메서드로 스키마를 조합한다. TypeScript 타입 추론도 완벽히 동작하므로, 스키마 정의만으로 파싱 결과의 타입이 자동 결정된다.
+
+내부적으로는 `XmlParsingStateMachine`이 XPath 매칭과 이벤트 라우팅을 담당한다. 중첩 배열 파싱 시 O(n^2)였던 스키마 재활성화를 O(n)으로 최적화한 것도 주요 개선 사항이다.
+
+## Parser 최적화 Phase 1: State Machine 구현 (+20.67%)
+
+동기 파서 `StaxXmlParserSync`의 초기 구현은 Generator 기반이었다. JavaScript의 `function*`과 `yield`를 사용하면 pull-based API를 자연스럽게 구현할 수 있지만, 성능 측정 결과 Generator overhead가 무시할 수 없는 수준이었다.
+
+### 문제 분석
+
+Generator의 `next()` 호출마다 다음 비용이 발생한다:
+
+1. Generator 프레임 복원/저장 (컨텍스트 스위칭)
+2. 새로운 `IteratorResult` 객체 생성 (`{ value, done }`)
+3. 이벤트당 약 95ns의 overhead
+
+10MB XML 파일(약 50만 이벤트) 기준으로 Generator overhead만 약 47ms가 소요되었다.
+
+### 해결: State Machine 전환
+
+Generator를 제거하고 명시적 State Machine으로 전환했다. 핵심은 파서 상태를 `enum`으로 관리하고, `IteratorResult` 객체를 재사용하는 것이다.
+
+```typescript
+enum ParserState {
+  INITIAL = 0,
+  PARSING = 1,
+  DONE = 2
+}
+
+export class StaxXmlParserSync
+  implements Iterable<AnyXmlEvent>, Iterator<AnyXmlEvent> {
+
+  private state: ParserState = ParserState.INITIAL;
+  private pendingEvent: AnyXmlEvent | null = null;
+
+  // IteratorResult 객체 재사용 - 할당 비용 제거
+  private readonly iteratorResult: IteratorResult<AnyXmlEvent> = {
+    value: undefined as any,
+    done: false
+  };
+  private readonly doneResult: IteratorResult<AnyXmlEvent> = {
+    value: undefined,
+    done: true
+  };
+
+  public next(): IteratorResult<AnyXmlEvent> {
+    // Self-closing 태그의 두 번째 이벤트 처리 (fast path)
+    if (this.pendingEvent !== null) {
+      this.iteratorResult.value = this.pendingEvent;
+      this.pendingEvent = null;
+      return this.iteratorResult;
+    }
+
+    switch (this.state) {
+      case ParserState.INITIAL:
+        this.state = ParserState.PARSING;
+        this.iteratorResult.value = this.createStartDocumentEvent();
+        return this.iteratorResult;
+
+      case ParserState.PARSING:
+        const event = this.parseNextEvent();
+        if (event !== null) {
+          this.iteratorResult.value = event;
+          return this.iteratorResult;
+        }
+        this.state = ParserState.DONE;
+        this.iteratorResult.value = this.createEndDocumentEvent();
+        return this.iteratorResult;
+
+      case ParserState.DONE:
+        return this.doneResult;
+    }
+  }
+}
+```
+
+Self-closing 태그(`<br/>`)는 START_ELEMENT과 END_ELEMENT 두 이벤트를 생성해야 하는데, `pendingEvent` 필드로 이를 처리한다. Generator에서는 `yield`를 두 번 호출하면 되지만, State Machine에서는 명시적 큐잉이 필요하다.
+
+### 결과
+
+| 측정 항목 | Generator (before) | State Machine (after) | 개선율 |
+|---|---|---|---|
+| 10MB 파싱 | 115.98ms | 92.00ms | **+20.67%** |
+| 이벤트당 overhead | ~95ns | ~10ns | **-89.5%** |
+| CV (변동계수) | - | 2.52% | 안정적 |
+
+이벤트당 overhead가 95ns에서 10ns로 약 9.5배 감소했다. 테스트 796개 전체 통과를 확인했다.
+
+## Parser 최적화 Phase 2: Circular Buffer Queue (~15%)
+
+비동기 파서 `StaxXmlParser`에서는 이벤트 큐의 `Array.shift()` 연산이 병목이었다.
+
+### 문제 분석
+
+JavaScript의 `Array.shift()`는 첫 번째 요소를 제거한 후 나머지 모든 요소의 인덱스를 재조정한다. 이는 O(n) 연산으로, 큐에 이벤트가 쌓일수록 성능이 선형으로 저하된다.
+
+```
+Array.shift() 비용: O(n) - 요소 수에 비례
+  [a, b, c, d, e].shift()
+  -> b를 [0]으로, c를 [1]로, d를 [2]로... 전부 이동
+```
+
+### 해결: Circular Buffer
+
+고정 크기 배열에 head/tail 포인터를 두는 Circular Buffer로 교체했다. Dequeue가 O(1)이 되고, 필요 시 자동으로 크기를 두 배로 늘린다.
+
+```typescript
+export class StaxXmlParser implements AsyncIterator<AnyXmlEvent> {
+  // Circular Buffer Queue
+  private eventQueue: AnyXmlEvent[];
+  private queueHead: number = 0;
+  private queueTail: number = 0;
+  private queueSize: number = 0;
+  private readonly initialCapacity: number;
+
+  constructor(xmlStream: ReadableStream<Uint8Array>, options = {}) {
+    this.initialCapacity = options.initialQueueCapacity || 1024;
+    this.eventQueue = new Array(this.initialCapacity);
+    // ...
+  }
+
+  // O(1) enqueue
+  private _enqueueEvent(event: AnyXmlEvent): void {
+    if (this.queueSize === this.eventQueue.length) {
+      this._growQueue();
+    }
+    this.eventQueue[this.queueTail] = event;
+    this.queueTail = (this.queueTail + 1) % this.eventQueue.length;
+    this.queueSize++;
+  }
+
+  // O(1) dequeue - Array.shift()의 O(n)을 대체
+  private _dequeueEvent(): AnyXmlEvent | null {
+    if (this.queueSize === 0) return null;
+
+    const event = this.eventQueue[this.queueHead];
+    this.eventQueue[this.queueHead] = undefined!; // GC 허용
+    this.queueHead = (this.queueHead + 1) % this.eventQueue.length;
+    this.queueSize--;
+    return event;
+  }
+}
+```
+
+### 결과
+
+| 측정 항목 | Array.shift() (before) | Circular Buffer (after) | 개선율 |
+|---|---|---|---|
+| Queue 작업 비용 | ~50ns | ~10ns | **-80%** |
+| 1GB 파일 파싱 | baseline | ~15% 향상 | **~15%** |
+
+파일이 클수록 큐에 이벤트가 많이 쌓이므로 Circular Buffer의 효과가 극대화된다. 1GB 파일에서 약 15%의 성능 향상을 확인했다.
+
+## Writer 최적화: Regex 캐싱 + 속성 배칭 + 조기 엔티티 체크 (+31.7%)
+
+XML Writer(`StaxXmlWriterSync`)에 세 가지 알고리즘 최적화를 적용하여 평균 31.7% 성능 향상을 달성했다.
+
+### Optimization 1: Regex 캐싱 (+9-26%)
+
+XML entity escaping에서 매번 정규식을 생성하는 대신, static 필드로 캐싱한다.
+
+```typescript
+export class StaxXmlWriterSync {
+  // 정적 캐싱 - 인스턴스 간 공유
+  private static readonly BASIC_ENTITY_MAP: Record<string, string> = {
+    '&': '&amp;', '<': '&lt;', '>': '&gt;',
+    '"': '&quot;', '\'': '&apos;'
+  };
+  private static readonly BASIC_ENTITY_REGEX = /[&<>"']/g;
+
+  // Custom entity가 있을 경우 생성자에서 한 번만 빌드
+  private customEntityRegex?: RegExp;
+  private fullEntityMap?: Record<string, string>;
+}
+```
+
+### Optimization 2: 속성 문자열 배칭 (+36.5%)
+
+속성마다 개별 `_write()` 호출을 하는 대신, 전체 속성 문자열을 한 번에 조립하여 단일 `_write()` 호출로 처리한다.
+
+```typescript
+// Before: 속성마다 _write 호출
+for (const [key, value] of Object.entries(attributes)) {
+  this._write(` ${key}="`);
+  this._write(this._escapeXml(value));
+  this._write('"');
+}
+
+// After: 문자열 배칭으로 단일 _write 호출
+let attrString = '';
+for (const [key, value] of Object.entries(attributes)) {
+  attrString += ` ${key}="${this._escapeXml(value)}"`;
+}
+if (attrString) {
+  this._write(attrString);
+}
+```
+
+함수 호출 overhead가 80% 감소했다. 속성이 많은 문서에서 최대 36.5%의 성능 향상이 나타났다.
+
+### Optimization 3: 조기 엔티티 체크 (+25.6%)
+
+대부분의 텍스트는 escape가 필요 없다. `string.includes()`로 먼저 확인하고, 특수문자가 없으면 정규식 실행을 건너뛴다.
+
+```typescript
+private _escapeXml(text: string): string {
+  if (!text) return '';
+  if (!this.options.autoEncodeEntities) return text;
+
+  // Fast path: 특수문자 없으면 바로 반환
+  if (!text.includes('&') && !text.includes('<') &&
+      !text.includes('>') && !text.includes('"') &&
+      !text.includes("'")) {
+    return text;
+  }
+
+  return text.replace(
+    StaxXmlWriterSync.BASIC_ENTITY_REGEX,
+    (match) => StaxXmlWriterSync.BASIC_ENTITY_MAP[match] || match
+  );
+}
+```
+
+순수 텍스트 콘텐츠가 많은 문서에서 25.6%의 향상을 보였다.
+
+### Writer 최적화 종합 결과
+
+| 측정 항목 | 개선율 |
+|---|---|
+| 평균 향상 | **+31.7%** |
+| 최고 성능 (깊은 중첩 문서) | **+63.8%** |
+| 테스트 시나리오 12개 중 향상 | 91.7% |
+| 출력 정확성 | 바이트 단위 완벽 일치 |
+
+## 실패한 최적화들과 교훈
+
+모든 최적화가 성공한 것은 아니다. 오히려 실패한 시도들에서 더 중요한 교훈을 얻었다.
+
+### Writer: 버퍼링 전략 실패
+
+문자열 연결(`+=`) 대신 배열에 담았다가 `join()`하는 방식을 시도했다.
+
+- **String Array 방식**: -7.7% (오히려 느려짐)
+- **Uint8Array 방식**: -42.5% (인코딩 overhead가 압도적)
+
+V8 엔진은 문자열 연결을 내부적으로 rope 구조(ConsString)로 처리하여 이미 O(n)에 가깝다. 수동 버퍼링은 이 최적화를 우회하여 오히려 성능을 악화시켰다.
+
+### Parser: 수동 인라이닝과 Fast Path 실패
+
+6가지 수동 최적화를 시도했으나 모두 실패하거나 퇴보했다:
+
+| 시도 | 결과 | 이유 |
+|---|---|---|
+| Function inlining | -5%, 메모리 +180% | V8 JIT가 이미 인라이닝 수행 |
+| Manual attribute parsing | -1% | 코드 복잡도만 증가 |
+| Fast entity decoding | -0.8% | lookup table이 V8 최적화를 방해 |
+| Lazy attribute parsing | 측정 불가 | 접근 패턴이 불규칙하여 비효율 |
+| String interning | 퇴보 | WeakMap overhead가 절약분 초과 |
+| Callback-based API | 호환성 파괴 | Pull 모델의 장점 상실 |
+
+### 핵심 교훈: V8 JIT를 신뢰하라
+
+> V8의 JIT 컴파일러는 hot path에서 인라이닝, escape analysis, hidden class 최적화를 자동으로 수행한다. 수동 최적화는 오히려 JIT의 가정을 깨뜨려 deoptimization을 유발할 수 있다.
+
+성공한 최적화들의 공통점은 **알고리즘 수준의 변경**(O(n) -> O(1), Generator 제거)이었다. 반면 실패한 최적화들은 V8이 이미 처리하는 **마이크로 수준의 변경**이었다.
+
+## 벤치마크 결과 비교표
+
+`cpu: 13th Gen Intel(R) Core(TM) i5-13600K`, `runtime: node 22.17.0 (x64-win32)` 기준이다.
+
+### large.xml (97MB) 파싱
+
+| 라이브러리 | 평균 시간 | p75 | 메모리 (avg) |
+|---|---|---|---|
+| **stax-xml** (to object) | **4.36 s** | 4.42 s | **2.66 MB** |
+| **stax-xml** (consume) | **3.61 s** | 3.65 s | **3.13 MB** |
+| xml2js | 6.00 s | 6.00 s | 1.80 MB |
+| fast-xml-parser | 4.25 s | 4.26 s | 151.81 MB |
+| txml | 1.05 s | 1.06 s | 179.81 MB |
+
+97MB 파일에서 stax-xml은 fast-xml-parser보다 빠르면서 메모리는 **57배 적게** 사용한다. txml이 속도는 가장 빠르지만 메모리를 180MB 가까이 사용하는 반면, stax-xml은 스트리밍 방식으로 3MB 이내를 유지한다.
+
+### complex.xml (2KB) 파싱
+
+| 라이브러리 | 평균 시간 | p75 | 메모리 (avg) |
+|---|---|---|---|
+| **stax-xml** (to object) | **85.79 us** | 75.60 us | 105.11 KB |
+| **stax-xml** (consume) | **50.38 us** | 49.43 us | 271 B |
+| xml2js | 147.45 us | 153.50 us | 89.42 KB |
+| fast-xml-parser | 101.11 us | 102.20 us | 92.92 KB |
+| txml | 9.40 us | 9.41 us | 126 B |
+
+작은 파일에서도 stax-xml은 xml2js 대비 1.7배, fast-xml-parser 대비 1.2배 빠르다. consume 모드의 메모리 사용량이 271 바이트로 극도로 낮은 것이 특징이다.
+
+### 성능 요약
+
+- **대용량 파일**: 메모리 효율에서 압도적 우위 (2.66MB vs 151MB)
+- **소용량 파일**: xml2js, fast-xml-parser보다 빠르되 txml보다는 느림
+- **Throughput**: 평균 125 MB/s, GC pressure 극히 낮음
+
+## NPM 퍼블리싱 워크플로우
+
+stax-xml은 pnpm workspace 기반 모노레포로 관리된다. `packages/stax-xml`이 NPM에 퍼블리싱되는 실제 패키지이고, `packages/docs`가 공식 문서 사이트(Starlight 기반), `packages/benchmark`가 벤치마크 인프라다.
+
+GitHub Actions 워크플로우는 세 가지가 돌아간다:
+
+1. **CI** (`ci.yml`): PR마다 `pnpm test`로 전체 796개 테스트 실행
+2. **Docs** (`docs.yml`): TypeDoc으로 API 문서 생성 후 GitHub Pages 배포
+3. **Release** (`release.yml`): 태그 푸시 시 `pnpm publish --filter stax-xml`으로 NPM 퍼블리싱
+
+pnpm은 npm과 달리 `NODE_AUTH_TOKEN` 환경변수를 직접 읽지 않으므로, `.npmrc` 파일에 별도의 인증 설정이 필요하다. 이는 CI/CD 파이프라인에서 자주 만나는 함정이다.
+
+```yaml
+# .npmrc 설정
+//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+현재 NPM에 `stax-xml` v0.5.2로 퍼블리싱되어 있으며, CommonJS와 ES Module 모두 지원한다.
+
+```bash
+npm install stax-xml
+```
+
+---
+
+stax-xml의 최적화 여정을 요약하면, **알고리즘 수준의 변경은 효과적이고 마이크로 수준의 수동 최적화는 V8 JIT를 방해한다**는 것이다. Generator를 State Machine으로, Array.shift()를 Circular Buffer로 교체한 것처럼 복잡도 자체를 바꾸는 접근이 유효했다. V8이 잘 하는 것은 V8에 맡기되, V8이 할 수 없는 것(알고리즘 선택)에 집중하는 것이 JavaScript 성능 최적화의 핵심이다.

@@ -1,3 +1,77 @@
 Initializing git... 
 Initialized empty Git repository in G:/programming/astro-mdx-blog-template-v6/.git/
 Adding files... 
+warning: in the working copy of '.github/workflows/deploy-pages.yml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'astro.config.mjs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'deploy.log', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'package.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'pnpm-lock.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'pnpm-workspace.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'public/llms.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'public/robots.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'scripts/copy-post-assets.mjs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'scripts/remark-rewrite-post-assets.mjs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/components/Giscus.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/components/Header.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/components/SeoHead.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/components/ThemeToggle.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/content/config.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/content/posts/2026-02-04-welcome/index.mdx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/content/posts/2026-02-10-getting-started/index.mdx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/layouts/BaseLayout.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/lib/slug.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/blog/[slug].astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/blog/index.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/index.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/resume.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/resume.mdx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/rss.xml.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/pages/search/index.astro', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/site.config.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/styles/global.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tsconfig.json', LF will be replaced by CRLF the next time Git touches it
+Committing... 
+[master (root-commit) 4dafb12] Initial commit
+ 33 files changed, 5404 insertions(+)
+ create mode 100644 .github/workflows/deploy-pages.yml
+ create mode 100644 .gitignore
+ create mode 100644 README.md
+ create mode 100644 astro.config.mjs
+ create mode 100644 deploy.bat
+ create mode 100644 deploy.log
+ create mode 100644 package.json
+ create mode 100644 pnpm-lock.yaml
+ create mode 100644 pnpm-workspace.yaml
+ create mode 100644 public/llms.txt
+ create mode 100644 public/og-default.svg
+ create mode 100644 public/robots.txt
+ create mode 100644 scripts/copy-post-assets.mjs
+ create mode 100644 scripts/remark-rewrite-post-assets.mjs
+ create mode 100644 src/components/Giscus.astro
+ create mode 100644 src/components/Header.astro
+ create mode 100644 src/components/SeoHead.astro
+ create mode 100644 src/components/ThemeToggle.astro
+ create mode 100644 src/content/config.ts
+ create mode 100644 src/content/posts/2026-02-04-welcome/index.mdx
+ create mode 100644 src/content/posts/2026-02-10-getting-started/index.mdx
+ create mode 100644 src/layouts/BaseLayout.astro
+ create mode 100644 src/lib/slug.ts
+ create mode 100644 src/pages/blog/[slug].astro
+ create mode 100644 src/pages/blog/index.astro
+ create mode 100644 src/pages/index.astro
+ create mode 100644 src/pages/resume.astro
+ create mode 100644 src/pages/resume.mdx
+ create mode 100644 src/pages/rss.xml.js
+ create mode 100644 src/pages/search/index.astro
+ create mode 100644 src/site.config.ts
+ create mode 100644 src/styles/global.css
+ create mode 100644 tsconfig.json
+Renaming branch... 
+Adding remote... 
+Pushing... 
+branch 'main' set up to track 'origin/main'.
+To https://github.com/Clickin/Clickin.github.io.git
+ + 9d1220c...4dafb12 main -> main (forced update)
+Done. 

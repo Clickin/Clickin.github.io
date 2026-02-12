@@ -1,0 +1,420 @@
+---
+title: "CBXShell-rs: Rust로 다시 쓴 Windows 셸 익스텐션"
+description: "C++ Windows Shell Extension을 Rust로 재구현하며 얻은 기술적 인사이트를 공유합니다."
+date: 2026-02-12
+category: "project"
+tags: ["rust", "windows", "shell-extension", "com", "webp", "avif"]
+draft: false
+---
+
+## 프로젝트 소개
+
+CBXShell-rs는 Windows Explorer에서 만화책 아카이브(CBZ, CBR, CB7) 파일의 썸네일 미리보기를 제공하는 Shell Extension입니다. 원본은 T800 Productions가 C++/ATL/WTL로 작성한 [CBXShell](https://github.com/T800G/CBXShell)이며, 이를 Rust로 완전히 재구현한 프로젝트입니다.
+
+지원하는 기능은 다음과 같습니다.
+
+- **아카이브 포맷**: ZIP, RAR, 7z (및 CBZ, CBR, CB7 확장자)
+- **이미지 포맷**: JPEG, PNG, GIF, BMP, TIFF, ICO, WebP, AVIF
+- **Windows 통합**: IThumbnailProvider 기반 네이티브 썸네일, IQueryInfo 툴팁
+- **고품질 리사이징**: `fast_image_resize` 크레이트의 Lanczos3 필터 적용
+- **스트리밍 아키텍처**: IStream 직접 스트리밍으로 대용량 아카이브 처리 최적화
+
+## C++에서 Rust로: 재구현 동기
+
+원본 CBXShell은 2003년 CodeProject에 게시된 C++ 프로젝트입니다. ATL/WTL 기반으로 작성되어 COM 인터페이스를 구현했지만, 몇 가지 한계가 있었습니다.
+
+**메모리 안전성**: C++ COM 객체는 수동 레퍼런스 카운팅과 raw pointer 관리가 필요합니다. Shell Extension은 Explorer 프로세스 내부에서 실행되므로, 메모리 버그는 Explorer 전체를 크래시시킬 수 있습니다.
+
+**최신 이미지 포맷**: 원본은 GDI+에 의존하여 WebP나 AVIF 같은 최신 포맷을 지원하지 못했습니다. Rust의 `image` 크레이트는 이 포맷들을 네이티브로 지원합니다.
+
+**레거시 API**: 원본은 IExtractImage + IPersistFile 조합을 사용했습니다. Windows Vista 이후 도입된 IThumbnailProvider + IInitializeWithStream이 더 효율적이고 안전한 인터페이스입니다.
+
+**빌드 환경**: ATL/WTL은 Visual Studio에 강하게 결합되어 있습니다. Rust는 `cargo build` 한 줄로 빌드가 완료되며, `windows-rs` 크레이트가 Windows SDK 바인딩을 자동 생성합니다.
+
+## IThumbnailProvider COM 인터페이스 구현
+
+Windows Shell Extension의 핵심은 COM(Component Object Model) 인터페이스 구현입니다. Rust에서 COM을 구현하는 것은 언어 차원에서 지원되지 않기 때문에 `windows-rs` 크레이트의 `#[implement]` 매크로를 활용합니다.
+
+### COM 객체 정의
+
+```rust
+#[implement(IThumbnailProvider, IInitializeWithStream, IQueryInfo)]
+pub struct CBXShell {
+    ref_count: AtomicU32,
+    stream: Mutex<Option<IStream>>,
+}
+```
+
+`#[implement]` 매크로가 IUnknown vtable, QueryInterface, AddRef/Release를 자동 생성합니다. 개발자는 인터페이스의 실제 메서드만 구현하면 됩니다.
+
+### IInitializeWithStream: 스트림 기반 초기화
+
+Windows Explorer가 파일을 열면, Shell Extension에 IStream을 전달합니다. 이전 IPersistFile 방식은 파일 경로를 전달했지만, IInitializeWithStream은 스트림 객체를 직접 전달하여 보안과 성능이 모두 향상됩니다.
+
+```rust
+impl IInitializeWithStream_Impl for CBXShell {
+    fn Initialize(&self, pstream: Option<&IStream>, _grfmode: u32) -> Result<()> {
+        let stream = pstream
+            .ok_or_else(|| Error::from(E_POINTER))?
+            .clone();
+
+        *self.stream.lock().unwrap() = Some(stream);
+        Ok(())
+    }
+}
+```
+
+### IThumbnailProvider: 썸네일 추출 파이프라인
+
+`GetThumbnail` 메서드가 호출되면 다음 파이프라인이 실행됩니다.
+
+1. IStream에서 아카이브 데이터 스트리밍
+2. Magic bytes로 아카이브 타입 감지 (ZIP, RAR, 7z)
+3. 아카이브에서 첫 번째 이미지 탐색 (선택적 자연 정렬)
+4. 이미지 데이터 추출 및 magic header 검증
+5. 이미지 디코딩 및 썸네일 크기 리사이징
+6. HBITMAP 변환 후 Explorer에 반환
+
+```rust
+impl IThumbnailProvider_Impl for CBXShell {
+    fn GetThumbnail(
+        &self, cx: u32, phbmp: *mut HBITMAP, pdwalpha: *mut WTS_ALPHATYPE
+    ) -> Result<()> {
+        match self.extract_thumbnail_internal(cx) {
+            Ok(hbitmap) => {
+                unsafe {
+                    *phbmp = hbitmap;
+                    if !pdwalpha.is_null() {
+                        *pdwalpha = WTSAT_RGB;
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(Error::from(HRESULT::from(e))),
+        }
+    }
+}
+```
+
+### DLL Export 함수들
+
+COM DLL은 4개의 표준 export 함수가 필요합니다. Rust에서는 `#[no_mangle]`과 `extern "system"`으로 C ABI를 노출합니다.
+
+```rust
+#[no_mangle]
+pub extern "system" fn DllGetClassObject(
+    rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut c_void,
+) -> HRESULT { /* ClassFactory 생성 및 반환 */ }
+
+#[no_mangle]
+pub extern "system" fn DllCanUnloadNow() -> HRESULT {
+    if get_dll_ref_count() == 0 { S_OK } else { S_FALSE }
+}
+
+#[no_mangle]
+pub extern "system" fn DllRegisterServer() -> HRESULT { /* 레지스트리 등록 */ }
+
+#[no_mangle]
+pub extern "system" fn DllUnregisterServer() -> HRESULT { /* 레지스트리 해제 */ }
+```
+
+`DLL_REF_COUNT`를 `AtomicU32`로 관리하여 thread-safe한 레퍼런스 카운팅을 보장합니다. C++에서는 `InterlockedIncrement`/`InterlockedDecrement`를 직접 호출해야 하지만, Rust의 atomic 타입이 이를 안전하게 추상화합니다.
+
+## 이미지 포맷 지원: WebP와 AVIF
+
+### 디코딩 파이프라인
+
+이미지 디코딩은 `image` 크레이트의 자동 포맷 감지 기능을 활용합니다.
+
+```rust
+pub fn decode_image(data: &[u8]) -> Result<DynamicImage> {
+    if data.is_empty() {
+        return Err(CbxError::Image("Empty image data".to_string()));
+    }
+
+    let reader = ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| CbxError::Image(format!("Format detection failed: {}", e)))?;
+
+    reader.decode()
+        .map_err(|e| CbxError::Image(format!("Failed to decode image: {}", e)))
+}
+```
+
+`Cargo.toml`에서 `image` 크레이트의 feature flag로 지원 포맷을 제어합니다.
+
+```toml
+image = { version = "0.25", default-features = false, features = [
+    "webp", "jpeg", "png", "gif", "bmp", "tiff", "ico"
+] }
+```
+
+`default-features = false`로 불필요한 포맷을 제외하여 바이너리 크기를 최소화합니다.
+
+### 고품질 리사이징
+
+썸네일 생성 시 `fast_image_resize` 크레이트를 사용합니다. 이 크레이트는 SIMD 최적화된 리사이징을 제공하며, Lanczos3 필터로 사진 콘텐츠에 최적화된 품질을 보장합니다.
+
+```rust
+pub fn calculate_thumbnail_size(
+    src_width: u32, src_height: u32, max_width: u32, max_height: u32,
+) -> (u32, u32) {
+    let rx = max_width as f32 / src_width as f32;
+    let ry = max_height as f32 / src_height as f32;
+    let scale = rx.min(ry);
+
+    // 원본보다 크게 확대하지 않음
+    if scale >= 1.0 {
+        return (src_width, src_height);
+    }
+
+    let new_width = (src_width as f32 * scale).round() as u32;
+    let new_height = (src_height as f32 * scale).round() as u32;
+    (new_width.max(1), new_height.max(1))
+}
+```
+
+이 계산은 원본 C++ 구현의 `StretchBlt` HALFTONE 모드 동작을 정확히 재현합니다. Aspect ratio를 유지하면서 업스케일링은 하지 않는 것이 핵심입니다.
+
+## 아카이브 핸들링: ZIP, RAR, 7z
+
+### Trait 기반 아키텍처
+
+세 가지 아카이브 포맷을 단일 인터페이스로 추상화합니다.
+
+```rust
+pub trait Archive {
+    fn open(path: &Path) -> Result<Box<dyn Archive>> where Self: Sized;
+    fn find_first_image(&self, sort: bool) -> Result<ArchiveEntry>;
+    fn extract_entry(&self, entry: &ArchiveEntry) -> Result<Vec<u8>>;
+    fn get_metadata(&self) -> Result<ArchiveMetadata>;
+    fn archive_type(&self) -> ArchiveType;
+}
+```
+
+각 포맷은 별도의 크레이트로 처리합니다.
+
+| 포맷 | 크레이트 | 특성 |
+|---|---|---|
+| ZIP/CBZ | `zip` | Pure Rust, 직접 스트리밍 |
+| RAR/CBR | `unrar` | C 바인딩 (UnRAR 라이브러리) |
+| 7z/CB7 | `sevenz-rust` | Pure Rust, LZMA 지원 |
+
+### IStream 스트리밍 최적화
+
+v5.1.0에서 가장 큰 성능 개선은 IStream 스트리밍 아키텍처입니다. 기존에는 아카이브 전체를 메모리에 로드한 후 처리했지만, 이제 IStream에서 직접 스트리밍합니다.
+
+핵심은 Windows COM의 IStream을 Rust의 `Read + Seek` trait으로 래핑하는 `IStreamReader`입니다.
+
+```rust
+pub struct IStreamReader {
+    stream: IStream,
+    position: u64,
+}
+
+impl Read for IStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        unsafe {
+            let mut bytes_read = 0u32;
+            self.stream.Read(
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+                Some(&mut bytes_read),
+            )?;
+            self.position += bytes_read as u64;
+            Ok(bytes_read as usize)
+        }
+    }
+}
+
+impl Seek for IStreamReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        unsafe {
+            let (offset, origin) = match pos {
+                SeekFrom::Start(n) => (n as i64, STREAM_SEEK_SET),
+                SeekFrom::End(n) => (n, STREAM_SEEK_END),
+                SeekFrom::Current(n) => (n, STREAM_SEEK_CUR),
+            };
+            let mut new_position = 0u64;
+            self.stream.Seek(offset, origin, Some(&mut new_position))?;
+            self.position = new_position;
+            Ok(new_position)
+        }
+    }
+}
+```
+
+이 래퍼 덕분에 `zip`, `sevenz-rust` 등 Rust 크레이트가 IStream을 파일처럼 직접 읽을 수 있습니다. 아카이브 타입은 처음 16바이트의 magic bytes로 감지합니다.
+
+```rust
+pub fn open_archive_from_stream<R: Read + Seek + 'static>(
+    mut reader: R,
+) -> Result<Box<dyn Archive>> {
+    let mut magic_bytes = [0u8; 16];
+    reader.read_exact(&mut magic_bytes)?;
+    let archive_type = detect_archive_type_from_bytes(&magic_bytes)?;
+    reader.seek(SeekFrom::Start(0))?;
+
+    match archive_type {
+        ArchiveType::Zip => Ok(Box::new(ZipArchiveFromStream::new(reader)?)),
+        ArchiveType::Rar => Ok(Box::new(RarArchiveFromMemory::new_from_stream(reader)?)),
+        ArchiveType::SevenZip => Ok(Box::new(SevenZipArchiveFromStream::new(reader)?)),
+    }
+}
+```
+
+성능 개선 결과는 다음과 같습니다.
+
+| 포맷 | 이전 (1GB) | 이후 (1GB) | 개선 | 메모리 감소 |
+|---|---|---|---|---|
+| ZIP/CBZ | 3.1s | 0.13s | 24x | 500x |
+| RAR/CBR | 5.2s | 2.2s | 2.4x | 1000x |
+| 7z/CB7 | 3.1s | 0.16s | 19x | 500x |
+
+ZIP은 Central Directory를 끝에서 읽어 메타데이터만 파싱한 후 대상 이미지만 추출하므로, 1GB 아카이브에서도 약 2MB만 실제로 읽습니다. 7z는 `RefCell` 패턴으로 `sevenz-rust`의 `&mut self` 제약을 우회하여 스트리밍을 구현했습니다.
+
+## Astro 기반 이중 언어 문서 사이트
+
+CBXShell-rs는 `docs/` 디렉토리에 Astro 기반 문서 사이트를 포함합니다. 한국어와 영어를 동시에 지원하는 이중 언어 구조로 설계되었습니다.
+
+```
+docs/
+├── astro.config.mjs
+├── package.json
+├── pnpm-lock.yaml
+├── public/
+└── src/
+```
+
+pnpm을 패키지 매니저로 사용하며, Astro의 정적 사이트 생성 기능으로 빌드합니다. 문서 사이트는 설치 가이드, 기능 설명, 그리고 지원 포맷 목록을 제공합니다.
+
+## GitHub Pages와 GitHub Actions CI/CD
+
+문서 사이트는 GitHub Actions로 자동 빌드 및 배포됩니다.
+
+```yaml
+name: Docs
+on:
+  push:
+    branches: [master]
+    paths: ["docs/**", ".github/workflows/docs.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+```
+
+워크플로우의 주요 설계 결정은 다음과 같습니다.
+
+- **경로 필터링**: `docs/**` 변경 시에만 빌드 트리거 (Rust 소스 변경 시 불필요한 빌드 방지)
+- **pnpm 캐싱**: `cache-dependency-path`로 lock 파일 기반 캐시 활용
+- **조건부 배포**: `master` 브랜치 push 시에만 deploy job 실행 (PR에서는 빌드 검증만)
+- **수동 트리거**: `workflow_dispatch`로 필요 시 수동 배포 가능
+
+배포 인프라 역시 NSIS 인스톨러를 GitHub Releases로 배포하며, x64와 ARM64 두 아키텍처를 지원합니다.
+
+## 프로젝트 구조와 설계 원칙
+
+전체 프로젝트는 Cargo workspace로 구성되며, 단일 크레이트 내에 DLL(cdylib)과 Configuration Manager 바이너리를 함께 빌드합니다.
+
+```
+CBXShell-rs/
+├── Cargo.toml                    # Workspace 설정
+├── CBXShell/
+│   ├── Cargo.toml                # 크레이트 설정 (cdylib + bin)
+│   ├── build.rs                  # 리소스 임베딩
+│   └── src/
+│       ├── lib.rs                # DLL 진입점, COM export
+│       ├── com/                  # COM 구현
+│       │   ├── class_factory.rs  # IClassFactory
+│       │   └── cbxshell.rs       # IThumbnailProvider + IInitializeWithStream
+│       ├── archive/              # 아카이브 포맷 지원
+│       │   ├── mod.rs            # Archive trait 및 통합 API
+│       │   ├── zip.rs            # ZIP 스트리밍
+│       │   ├── rar.rs            # RAR 처리
+│       │   ├── sevenz.rs         # 7z 스트리밍 (RefCell 패턴)
+│       │   └── stream_reader.rs  # IStream -> Read + Seek 래퍼
+│       ├── image_processor/      # 이미지 처리
+│       │   ├── decoder.rs        # 포맷 자동 감지 디코딩
+│       │   ├── resizer.rs        # SIMD 최적화 리사이징
+│       │   └── hbitmap.rs        # Windows HBITMAP 변환
+│       ├── registry.rs           # COM 서버 등록
+│       └── manager/              # Configuration GUI (egui)
+├── installer.nsi                 # NSIS 인스톨러 스크립트
+└── docs/                         # Astro 문서 사이트
+```
+
+Release 프로파일에서는 LTO(Link-Time Optimization), 단일 codegen unit, strip, panic=abort를 적용하여 바이너리 크기와 성능을 최적화합니다.
+
+```toml
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+```
+
+## unsafe 코드와 메모리 안전성
+
+Rust로 COM DLL을 구현할 때 `unsafe`는 피할 수 없습니다. 프로젝트 전체에 42개의 unsafe 블록이 존재하며, 분석 결과 41개는 불가피한 FFI/COM 호출이고, 1개만 safe 코드로 리팩토링 가능했습니다.
+
+unsafe 블록의 분류는 다음과 같습니다.
+
+- **Windows FFI** (35개): Registry, File, GDI, UI API 호출
+- **COM Interface** (6개): DllGetClassObject, IThumbnailProvider, IStream
+- **Memory Operations** (1개): CreateDIBSection 픽셀 버퍼
+
+모든 unsafe 블록에는 왜 unsafe가 필요한지, 어떤 안전성 보장이 있는지 주석으로 문서화했습니다. 예를 들어 IStream::Read 호출에는 다음과 같은 주석이 포함됩니다.
+
+```rust
+// UNAVOIDABLE UNSAFE: IStream::Read is a COM method
+// Why unsafe is required:
+// 1. COM method call: IStream::Read uses C++ vtable
+// 2. Raw buffer pointer: COM API requires *mut c_void
+// Safety guarantees:
+// - buf is valid mutable slice (Rust guarantees)
+// - Buffer size passed correctly (buf.len())
+// - bytes_read validated before use
+```
+
+Rust의 소유권 시스템이 unsafe 바깥에서 메모리 안전성을 보장하므로, unsafe는 최소한의 범위에서만 사용하고 나머지는 안전한 추상화로 감싸는 것이 핵심 전략입니다.
+
+## 마무리
+
+CBXShell-rs는 "오래된 C++ 프로젝트를 Rust로 재작성하면 무엇을 얻는가"에 대한 실제 사례입니다. COM이라는 레거시 인프라 위에서 Rust의 안전성과 현대적 에코시스템을 결합하는 과정에서 얻은 교훈을 정리하면 다음과 같습니다.
+
+- `windows-rs`의 `#[implement]` 매크로가 COM boilerplate를 크게 줄여줌
+- `Read + Seek` trait 래퍼로 Windows IStream과 Rust 에코시스템을 연결
+- trait 기반 아키텍처로 여러 아카이브 포맷을 단일 인터페이스로 추상화
+- IStream 스트리밍으로 1GB 아카이브 처리 시간을 3초에서 0.13초로 단축
+- 42개 unsafe 블록 중 41개는 FFI/COM에서 불가피하며, safe 추상화로 격리
+
+프로젝트 소스 코드는 [GitHub](https://github.com/Clickin/CBXShell-rs)에서 확인할 수 있으며, CPOL 1.02 라이선스로 공개되어 있습니다.
