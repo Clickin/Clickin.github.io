@@ -10,7 +10,8 @@ function ghPagesConfig() {
   const owner = process.env.GITHUB_REPOSITORY_OWNER;
   if (!isPages || !repoFull || !owner) return {};
   const repo = repoFull.split("/")[1];
-  return { site: `https://${owner}.github.io`, base: `/${repo}/` };
+  const isUserSite = repo.endsWith(".github.io");
+  return { site: `https://${owner}.github.io`, base: isUserSite ? "/" : `/${repo}/` };
 }
 
 export default defineConfig({
