@@ -3,44 +3,56 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { normalizePostSlug } from "../../lib/slug";
 import Giscus from "../../components/Giscus.astro";
+import TableOfContents from "../../components/TableOfContents.astro";
+import Series from "../../components/Series.astro";
 
 export async function getStaticPaths() {
-  const posts = await getCollection("posts", ({ data }) => !data.draft);
+  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
   return posts.map((p) => ({ params: { slug: normalizePostSlug(p.slug) }, props: { post: p } }));
 }
 const { post } = Astro.props;
 const rendered = await post.render();
-const Content = rendered.Content;
+const { Content, headings } = rendered;
 
 const dateStr = post.data.date.toISOString().slice(0, 10);
 const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 10) : null;
 ---
-<BaseLayout title={post.data.title} description={post.data.description}>
-  <article class="py-4">
-    <header class="mb-8">
-      <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
-      <div class="flex flex-wrap items-center gap-3 text-sm text-[var(--color-text-secondary)]">
-        <time datetime={post.data.date.toISOString()}>{dateStr}</time>
-        {updatedStr && (
-          <span class="text-[var(--color-text-secondary)]">
-            (updated {updatedStr})
+<BaseLayout title={post.data.title} description={post.data.description} mainClass="max-w-6xl mx-auto px-4 sm:px-6">
+  <div class="relative flex gap-8">
+    <article class="py-4 flex-1 min-w-0">
+      <header class="mb-8">
+        <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
+        <div class="flex flex-wrap items-center gap-3 text-sm text-[var(--color-text-secondary)]">
+          <time datetime={post.data.date.toISOString()}>{dateStr}</time>
+          {updatedStr && (
+            <span class="text-[var(--color-text-secondary)]">
+              (updated {updatedStr})
+            </span>
+          )}
+          <span>·</span>
+          <span class="px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)] text-xs font-medium">
+            {post.data.category}
           </span>
-        )}
-        <span>·</span>
-        <span class="px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)] text-xs font-medium">
-          {post.data.category}
-        </span>
-      </div>
-      {post.data.tags.length > 0 && (
-        <div class="flex flex-wrap gap-2 mt-3">
-          {post.data.tags.map((tag: string) => (
-            <span class="text-xs text-[var(--color-text-secondary)]">#{tag}</span>
-          ))}
         </div>
-      )}
-    </header>
+        {post.data.tags.length > 0 && (
+          <div class="flex flex-wrap gap-2 mt-3">
+            {post.data.tags.map((tag: string) => (
+              <span class="text-xs text-[var(--color-text-secondary)]">#{tag}</span>
+            ))}
+          </div>
+        )}
+      </header>
 
-    <Content />
-    <Giscus />
-  </article>
+      {post.data.series && (
+        <Series series={post.data.series} currentSlug={post.slug} />
+      )}
+
+      <Content />
+      <Giscus />
+    </article>
+
+    <aside class="hidden xl:block w-64 flex-shrink-0">
+      <TableOfContents headings={headings} />
+    </aside>
+  </div>
 </BaseLayout>

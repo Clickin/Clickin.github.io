@@ -1,4 +1,12 @@
-# llms.txt
-Site: Dev Blog
-Purpose: Developer notes.
-Key sections: /blog /search /rss.xml
+# Clickin Devlog
+
+Personal developer notes and write-ups.
+
+## Key Pages
+- Main Blog: /
+- Projects: /projects/
+- RSS Feed: /rss.xml
+
+## Sub-Projects
+- CBXShell-rs: /CBXShell-rs/
+- stax-xml: /stax-xml/

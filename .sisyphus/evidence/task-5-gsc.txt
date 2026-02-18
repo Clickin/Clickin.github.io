@@ -1,0 +1,13 @@
+File created: public/google-verification-placeholder.html
+Content verified: 
+<!-- Google Search Console Verification Placeholder -->
+<!-- 
+  INSTRUCTIONS:
+  1. Go to Google Search Console: https://search.google.com/search-console
+  2. Add property: https://clickin.github.io
+  3. Choose "HTML file" verification method
+  4. Download the verification file (e.g., google1234567890abcdef.html)
+  5. Replace this file with the downloaded file
+  6. Commit and push
+  7. Click "Verify" in GSC
+-->

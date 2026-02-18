@@ -1,0 +1,53 @@
+---
+import { getCollection } from "astro:content";
+
+interface Props {
+  series: string;
+  currentSlug: string;
+}
+
+const { series, currentSlug } = Astro.props;
+
+const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+const seriesPosts = posts
+  .filter((post) => post.data.series === series)
+  .sort((a, b) => {
+    if (a.data.order && b.data.order) {
+      return a.data.order - b.data.order;
+    }
+    return a.data.date.valueOf() - b.data.date.valueOf();
+  });
+---
+
+{
+  seriesPosts.length > 0 && (
+    <nav class="series-container mb-8 p-4 bg-[var(--color-bg-secondary)] rounded-lg border border-[var(--color-border)]" aria-label={`Series: ${series}`}>
+      <h3 class="text-sm font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-3">
+        Series: {series}
+      </h3>
+      <ul class="space-y-2">
+        {seriesPosts.map((post) => {
+          const isCurrent = post.slug === currentSlug;
+          return (
+            <li class="flex items-start gap-2">
+              <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] flex-shrink-0 opacity-50" />
+              {isCurrent ? (
+                <span class="text-sm font-medium text-[var(--color-accent)]">
+                  {post.data.title}
+                  <span class="ml-2 text-xs text-[var(--color-text-secondary)] font-normal">(Current)</span>
+                </span>
+              ) : (
+                <a
+                  href={`/blog/${post.slug}`}
+                  class="text-sm text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
+                >
+                  {post.data.title}
+                </a>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  )
+}

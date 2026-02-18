@@ -3,7 +3,7 @@ import "../styles/global.css";
 import Header from "../components/Header.astro";
 import SeoHead from "../components/SeoHead.astro";
 import { site as siteCfg } from "../site.config";
-const { title, description, canonical } = Astro.props;
+const { title, description, canonical, mainClass = "container-blog" } = Astro.props;
 ---
 <!doctype html>
 <html lang={siteCfg.language}>
@@ -27,7 +27,7 @@ const { title, description, canonical } = Astro.props;
   </head>
   <body class="min-h-screen flex flex-col">
     <Header />
-    <main class="container-blog flex-1 py-8">
+    <main class={`${mainClass} flex-1 py-8`} data-pagefind-body>
       <slot />
     </main>
     <footer class="container-blog py-8 text-center text-sm text-[var(--color-text-secondary)] border-t border-[var(--color-border)]">

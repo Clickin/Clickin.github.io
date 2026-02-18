@@ -21,6 +21,6 @@
     "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
-    "pagefind": "^1.4.0"
+    "pagefind": "1.5.0-beta.1"
   }
 }

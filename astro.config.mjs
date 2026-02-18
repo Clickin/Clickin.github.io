@@ -14,7 +14,7 @@ function ghPagesConfig() {
 }
 
 export default defineConfig({
-  site: "https://example.github.io",
+  site: "https://clickin.github.io",
   integrations: [mdx({ remarkPlugins: [remarkRewritePostAssets] }), sitemap()],
   vite: {
     plugins: [

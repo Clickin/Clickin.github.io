@@ -1,0 +1,59 @@
+---
+interface Props {
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const { headings } = Astro.props;
+
+// Filter headings to only include h2 and h3
+const toc = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+---
+
+<nav class="toc-container hidden xl:block sticky top-20 w-64 max-h-[calc(100vh-5rem)] overflow-y-auto pr-4">
+  <h2 class="text-sm font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-4">On This Page</h2>
+  <ul class="space-y-2 text-sm border-l border-[var(--color-border)]">
+    {
+      toc.map((heading) => (
+        <li>
+          <a
+            href={`#${heading.slug}`}
+            class={`block pl-4 py-1 border-l-2 border-transparent text-[var(--color-text-secondary)] hover:border-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors duration-200 ${
+              heading.depth === 3 ? "ml-4" : ""
+            }`}
+            data-slug={heading.slug}
+          >
+            {heading.text}
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</nav>
+
+<script>
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        const id = entry.target.getAttribute("id");
+        const link = document.querySelector(`.toc-container a[href="#${id}"]`);
+
+        if (entry.isIntersecting) {
+          document.querySelectorAll(".toc-container a").forEach((a) => {
+            a.classList.remove("text-[var(--color-accent)]", "border-[var(--color-accent)]", "font-medium");
+            a.classList.add("text-[var(--color-text-secondary)]", "border-transparent");
+          });
+          
+          if (link) {
+            link.classList.remove("text-[var(--color-text-secondary)]", "border-transparent");
+            link.classList.add("text-[var(--color-accent)]", "border-[var(--color-accent)]", "font-medium");
+          }
+        }
+      });
+    },
+    { rootMargin: "-100px 0px -66% 0px" }
+  );
+
+  document.querySelectorAll("article h2, article h3").forEach((h) => {
+    observer.observe(h);
+  });
+</script>

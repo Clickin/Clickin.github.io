@@ -1,0 +1,30 @@
+# QA Evidence: Task 4 - llms.txt
+
+## File Created
+- Path: `public/llms.txt`
+
+## Content Verification
+```
+# Clickin Devlog
+
+Personal developer notes and write-ups.
+
+## Key Pages
+- Main Blog: /
+- Projects: /projects/
+- RSS Feed: /rss.xml
+
+## Sub-Projects
+- CBXShell-rs: /CBXShell-rs/
+- stax-xml: /stax-xml/
+```
+
+## Site Config Verification
+- Title: "Clickin Devlog" (from `src/site.config.ts`)
+- Description: "Personal developer notes and write-ups." (from `src/site.config.ts`)
+
+## Status
+- [x] File created/updated
+- [x] Contains site title and description
+- [x] Links to: main blog, projects page, CBXShell-rs, stax-xml, RSS
+- [x] Follows llms.txt formatting conventions

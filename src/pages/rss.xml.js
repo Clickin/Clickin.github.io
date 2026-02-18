@@ -3,7 +3,7 @@ import { getCollection } from "astro:content";
 import { site as siteCfg } from "../site.config";
 import { normalizePostSlug } from "../lib/slug";
 export async function GET(context){
-  const posts = await getCollection("posts", ({ data }) => !data.draft);
+  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
   return rss({
     title: siteCfg.title,
     description: siteCfg.description,
