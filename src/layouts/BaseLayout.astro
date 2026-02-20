@@ -3,10 +3,13 @@ import "../styles/global.css";
 import Header from "../components/Header.astro";
 import SeoHead from "../components/SeoHead.astro";
 import { site as siteCfg } from "../site.config";
-const { title, description, canonical, mainClass = "container-blog" } = Astro.props;
+const { title, description, canonical, ogImage, mainClass = "container-blog" } = Astro.props;
 const siteUrl = Astro.site ?? Astro.url;
 const baseUrl = new URL(import.meta.env.BASE_URL, siteUrl);
 const sitemapUrl = new URL("sitemap-index.xml", baseUrl).href;
+const pathWithoutTrailingSlash = Astro.url.pathname.replace(/\/+$/, "") || "/";
+const defaultOgImage = `/og${pathWithoutTrailingSlash === "/" ? "/index" : pathWithoutTrailingSlash}.png`;
+const resolvedOgImage = ogImage ?? defaultOgImage;
 const gaMeasurementId = import.meta.env.PUBLIC_GA_MEASUREMENT_ID;
 const hasGaMeasurementId = typeof gaMeasurementId === "string" && gaMeasurementId.length > 0;
 ---
@@ -37,7 +40,7 @@ const hasGaMeasurementId = typeof gaMeasurementId === "string" && gaMeasurementI
     </noscript>
     <link rel="sitemap" type="application/xml" href={sitemapUrl} />
     <title>{title ? `${title} — ${siteCfg.title}` : siteCfg.title}</title>
-    <SeoHead title={title} description={description} canonical={canonical} />
+    <SeoHead title={title} description={description} canonical={canonical} ogImage={resolvedOgImage} />
     <!-- Inline theme init to prevent FOUC -->
     <script is:inline>
       (function(){

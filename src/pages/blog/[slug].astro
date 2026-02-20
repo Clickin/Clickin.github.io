@@ -13,11 +13,12 @@ export async function getStaticPaths() {
 const { post } = Astro.props;
 const rendered = await post.render();
 const { Content, headings } = rendered;
+const ogImage = `/og/blog/${normalizePostSlug(post.slug)}.png`;
 
 const dateStr = post.data.date.toISOString().slice(0, 10);
 const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 10) : null;
 ---
-<BaseLayout title={post.data.title} description={post.data.description} mainClass="max-w-6xl mx-auto px-4 sm:px-6">
+<BaseLayout title={post.data.title} description={post.data.description} ogImage={ogImage} mainClass="max-w-6xl mx-auto px-4 sm:px-6">
   <div class="relative flex gap-8">
     <article class="py-4 flex-1 min-w-0">
       <header class="mb-8">
