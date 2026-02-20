@@ -7,6 +7,8 @@ const { title, description, canonical, mainClass = "container-blog" } = Astro.pr
 const siteUrl = Astro.site ?? Astro.url;
 const baseUrl = new URL(import.meta.env.BASE_URL, siteUrl);
 const sitemapUrl = new URL("sitemap-index.xml", baseUrl).href;
+const gaMeasurementId = import.meta.env.PUBLIC_GA_MEASUREMENT_ID;
+const hasGaMeasurementId = typeof gaMeasurementId === "string" && gaMeasurementId.length > 0;
 ---
 <!doctype html>
 <html lang={siteCfg.language}>
@@ -45,6 +47,19 @@ const sitemapUrl = new URL("sitemap-index.xml", baseUrl).href;
         }
       })();
     </script>
+    {
+      hasGaMeasurementId && (
+        <>
+          <script async src={`https://www.googletagmanager.com/gtag/js?id=${gaMeasurementId}`}></script>
+          <script is:inline define:vars={{ gaMeasurementId }}>
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag("js", new Date());
+            gtag("config", gaMeasurementId);
+          </script>
+        </>
+      )
+    }
   </head>
   <body class="min-h-screen flex flex-col">
     <Header />
@@ -52,8 +67,15 @@ const sitemapUrl = new URL("sitemap-index.xml", baseUrl).href;
       <slot />
     </main>
     <footer class="container-blog py-8 text-center text-sm text-[var(--color-text-secondary)] border-t border-[var(--color-border)]">
-      &copy; {new Date().getFullYear()} {siteCfg.author}. Built with
-      <a href="https://astro.build" class="text-[var(--color-link)] hover:text-[var(--color-link-hover)]">Astro</a>.
+      <div class="mb-2">
+        &copy; {new Date().getFullYear()} {siteCfg.author}. Built with
+        <a href="https://astro.build" class="text-[var(--color-link)] hover:text-[var(--color-link-hover)]">Astro</a>.
+      </div>
+      <div class="flex items-center justify-center gap-3">
+        <a href="/policy/privacy" class="text-[var(--color-link)] hover:text-[var(--color-link-hover)]">개인정보처리방침</a>
+        <span aria-hidden="true">|</span>
+        <a href="/policy/terms" class="text-[var(--color-link)] hover:text-[var(--color-link-hover)]">이용약관</a>
+      </div>
     </footer>
   </body>
 </html>
