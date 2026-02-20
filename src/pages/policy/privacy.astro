@@ -1,0 +1,59 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { site } from "../../site.config";
+---
+
+<BaseLayout
+  title="개인정보처리방침"
+  description={`${site.title} 개인정보처리방침`}
+  canonical="/policy/privacy"
+>
+  <article class="prose prose-zinc max-w-none dark:prose-invert">
+    <h1>개인정보처리방침</h1>
+    <p>
+      {site.title}(이하 "블로그")는 운영자의 기술 글을 공유하는 개인 블로그입니다. 블로그는 회원가입 기능을 제공하지
+      않습니다.
+    </p>
+
+    <h2>Google Analytics 사용 목적</h2>
+    <p>
+      블로그는 이용자 통계 확인을 위해서만 Google Analytics를 사용합니다. 어떤 주제의 글이 필요한지, 어떤 디바이스에
+      맞춰 디자인을 개선해야 하는지 판단하기 위한 목적입니다.
+    </p>
+
+    <h2>수집되는 정보</h2>
+    <ul>
+      <li>Google Analytics를 통해 확인되는 방문 통계 정보(예: 페이지 조회, 유입 경로, 기기/브라우저 유형)</li>
+      <li>쿠키 기반 통계 정보</li>
+    </ul>
+    <p>통계 확인 시에는 Google 측에서 제공하는 익명화 기반 집계 데이터를 기준으로 확인하는 것을 전제로 합니다.</p>
+
+    <h2>운영자가 직접 수집하지 않는 정보</h2>
+    <ul>
+      <li>블로그 자체 회원가입 정보(이름, 비밀번호, 연락처 등)</li>
+      <li>운영자가 보유하는 웹서버 접근 로그(본 블로그는 GitHub Pages로 배포되어 운영자가 서버 로그를 직접 수집하지 않음)</li>
+    </ul>
+
+    <h2>제3자 서비스</h2>
+    <ul>
+      <li>Google Analytics: 방문 통계 분석(Google의 정책에 따라 처리)</li>
+      <li>Giscus: GitHub 기반 댓글 기능(댓글 작성 시 GitHub 정책 적용)</li>
+    </ul>
+
+    <h2>쿠키 설정</h2>
+    <p>
+      사용자는 브라우저 설정에서 쿠키 저장을 제한하거나 삭제할 수 있습니다. 필요하면 Google Analytics 차단 브라우저
+      부가기능을 사용할 수 있습니다.
+    </p>
+
+    <h2>정책 변경</h2>
+    <p>본 방침은 운영 정책 또는 관련 법령 변경 시 수정될 수 있으며, 변경사항은 본 페이지에 반영합니다.</p>
+
+    <h2>댓글 운영 안내</h2>
+    <p>
+      블로그는 서비스 문의 채널을 별도로 운영하지 않습니다. 글 내용과 관련된 의견은 댓글 기능을 통해 남겨 주세요.
+    </p>
+
+    <p class="text-sm text-[var(--color-text-secondary)]">시행일: 2026-02-21</p>
+  </article>
+</BaseLayout>
