@@ -17,7 +17,13 @@ function ghPagesConfig() {
 export default defineConfig({
   site: "https://clickin.github.io",
   integrations: [mdx({ remarkPlugins: [remarkRewritePostAssets] }), sitemap()],
+  build: {
+    inlineStylesheets: "auto",
+  },
   vite: {
+    build: {
+      assetsInlineLimit: 30720, // 30KB - Inline CSS chunks up to 30KB to reduce render-blocking requests
+    },
     plugins: [
       tailwindcss(),
       {

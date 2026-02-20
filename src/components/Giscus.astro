@@ -3,49 +3,199 @@ import { giscus } from "../site.config";
 ---
 
 {giscus.enabled && (
-  <div class="giscus mt-16"></div>
+  <div class="giscus mt-16">
+    <div class="giscus-placeholder">
+      <p class="text-sm opacity-80">Comments load only when you ask.</p>
+      <button class="comments-load-button mt-3" type="button">Load comments</button>
+      <p class="comments-load-error mt-3 text-sm" role="alert" hidden></p>
+    </div>
+  </div>
   <script is:inline define:vars={{ giscus }}>
+    const GISCUS_SCRIPT_URL = "https://giscus.app/client.js";
+
     const getTheme = () => {
       return document.documentElement.classList.contains("dark") ? "dark" : "light";
     };
 
-    const script = document.createElement("script");
-    const theme = getTheme();
-
-    Object.entries({
-      src: "https://giscus.app/client.js",
-      "data-repo": giscus.repo,
-      "data-repo-id": giscus.repoId,
-      "data-category": giscus.category,
-      "data-category-id": giscus.categoryId,
-      "data-mapping": giscus.mapping,
-      "data-strict": "0",
-      "data-reactions-enabled": "1",
-      "data-emit-metadata": "0",
-      "data-input-position": "top",
-      "data-theme": theme,
-      "data-lang": "ko",
-      "data-loading": "lazy",
-      crossorigin: "anonymous",
-      async: true,
-    }).forEach(([key, value]) => {
-      script.setAttribute(key, value);
-    });
-
-    document.querySelector(".giscus")?.appendChild(script);
-
-    // Sync theme updates
-    const observer = new MutationObserver(() => {
-      const newTheme = getTheme();
+    const postThemeToGiscus = (theme) => {
       const iframe = document.querySelector("iframe.giscus-frame");
-      if (!iframe) return;
-      
+      if (!iframe || !iframe.contentWindow) return;
+
+      if (!iframe.src.startsWith("https://giscus.app")) return;
+
+      if (iframe.getAttribute("data-giscus-ready") !== "1") {
+        if (!iframe.hasAttribute("data-giscus-ready-hook")) {
+          iframe.setAttribute("data-giscus-ready-hook", "1");
+          iframe.addEventListener("load", () => {
+            if (!iframe.src.startsWith("https://giscus.app")) return;
+            iframe.setAttribute("data-giscus-ready", "1");
+            postThemeToGiscus(getTheme());
+          });
+        }
+        return;
+      }
+
       iframe.contentWindow.postMessage(
-        { giscus: { setConfig: { theme: newTheme } } },
+        { giscus: { setConfig: { theme } } },
         "https://giscus.app"
       );
+    };
+
+    // Sync theme updates (preserve existing behavior)
+    const observer = new MutationObserver(() => {
+      postThemeToGiscus(getTheme());
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
     });
 
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    const waitForIframe = (timeoutMs = 15000) => {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector("iframe.giscus-frame");
+        if (existing) return resolve(existing);
+
+        const container = document.querySelector(".giscus");
+        if (!container) return reject(new Error("Missing .giscus container"));
+
+        const timeoutId = window.setTimeout(() => {
+          obs.disconnect();
+          reject(new Error("Timed out waiting for giscus iframe"));
+        }, timeoutMs);
+
+        const obs = new MutationObserver(() => {
+          const iframe = document.querySelector("iframe.giscus-frame");
+          if (!iframe) return;
+          window.clearTimeout(timeoutId);
+          obs.disconnect();
+          resolve(iframe);
+        });
+
+        obs.observe(container, { childList: true, subtree: true });
+      });
+    };
+
+    const createGiscusScript = () => {
+      const script = document.createElement("script");
+      const theme = getTheme();
+
+      Object.entries({
+        src: GISCUS_SCRIPT_URL,
+        "data-repo": giscus.repo,
+        "data-repo-id": giscus.repoId,
+        "data-category": giscus.category,
+        "data-category-id": giscus.categoryId,
+        "data-mapping": giscus.mapping,
+        "data-strict": "0",
+        "data-reactions-enabled": "1",
+        "data-emit-metadata": "0",
+        "data-input-position": "top",
+        "data-theme": theme,
+        "data-lang": "ko",
+        "data-loading": "lazy",
+        crossorigin: "anonymous",
+        async: true,
+      }).forEach(([key, value]) => {
+        script.setAttribute(key, value);
+      });
+
+      return script;
+    };
+
+    const setup = () => {
+      const container = document.querySelector(".giscus");
+      if (!container) return;
+
+      const placeholder = container.querySelector(".giscus-placeholder");
+      const button = container.querySelector(".comments-load-button");
+      const errorEl = container.querySelector(".comments-load-error");
+      if (!(button instanceof HTMLButtonElement)) return;
+
+      let state = "idle";
+      let mountPromise;
+
+      const setLoading = (loading) => {
+        button.disabled = loading;
+        button.textContent = loading ? "Loading..." : "Load comments";
+      };
+
+      const setError = (message) => {
+        if (!(errorEl instanceof HTMLElement)) return;
+        if (!message) {
+          errorEl.hidden = true;
+          errorEl.textContent = "";
+          return;
+        }
+        errorEl.hidden = false;
+        errorEl.textContent = message;
+      };
+
+      const mount = async () => {
+        if (state === "loaded") return;
+        if (mountPromise) return mountPromise;
+
+        // If the iframe already exists (bfcache/re-entry), just finalize UI.
+        if (document.querySelector("iframe.giscus-frame")) {
+          state = "loaded";
+          setLoading(false);
+          setError("");
+          if (placeholder) placeholder.remove();
+          postThemeToGiscus(getTheme());
+          return;
+        }
+
+        state = "loading";
+        setLoading(true);
+        setError("");
+
+        mountPromise = (async () => {
+          try {
+            // If a previous attempt left a script behind (or it was mounted elsewhere),
+            // remove it so a retry can actually re-request the file.
+            if (!document.querySelector("iframe.giscus-frame")) {
+              document
+                .querySelectorAll(`script[src="${GISCUS_SCRIPT_URL}"]`)
+                .forEach((el) => el.remove());
+            }
+
+            container.appendChild(createGiscusScript());
+
+            await waitForIframe();
+
+            state = "loaded";
+            setLoading(false);
+            setError("");
+            if (placeholder) placeholder.remove();
+
+            // Ensure theme is correct even if it changed during load.
+            postThemeToGiscus(getTheme());
+          } catch (err) {
+            state = "idle";
+            setLoading(false);
+            setError(
+              "Failed to load comments. Check your connection and try again."
+            );
+            if (!document.querySelector("iframe.giscus-frame")) {
+              container
+                .querySelectorAll(`script[src="${GISCUS_SCRIPT_URL}"]`)
+                .forEach((el) => el.remove());
+            }
+            mountPromise = undefined;
+          }
+        })();
+
+        return mountPromise;
+      };
+
+      button.addEventListener("click", () => {
+        void mount();
+      });
+    };
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", setup, { once: true });
+    } else {
+      setup();
+    }
   </script>
 )}
