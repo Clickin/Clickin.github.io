@@ -4,6 +4,9 @@ import Header from "../components/Header.astro";
 import SeoHead from "../components/SeoHead.astro";
 import { site as siteCfg } from "../site.config";
 const { title, description, canonical, mainClass = "container-blog" } = Astro.props;
+const siteUrl = Astro.site ?? Astro.url;
+const baseUrl = new URL(import.meta.env.BASE_URL, siteUrl);
+const sitemapUrl = new URL("sitemap-index.xml", baseUrl).href;
 ---
 <!doctype html>
 <html lang={siteCfg.language}>
@@ -18,6 +21,7 @@ const { title, description, canonical, mainClass = "container-blog" } = Astro.pr
     <noscript>
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     </noscript>
+    <link rel="sitemap" type="application/xml" href={sitemapUrl} />
     <title>{title ? `${title} — ${siteCfg.title}` : siteCfg.title}</title>
     <SeoHead title={title} description={description} canonical={canonical} />
     <!-- Inline theme init to prevent FOUC -->
