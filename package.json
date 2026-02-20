@@ -9,7 +9,8 @@
     "prebuild": "node scripts/copy-post-assets.mjs",
     "build": "astro build",
     "postbuild": "pagefind --site dist",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "perf:baseline": "node scripts/perf/lighthouse-baseline.mjs"
   },
   "dependencies": {
     "@astrojs/mdx": "^4.0.0",
