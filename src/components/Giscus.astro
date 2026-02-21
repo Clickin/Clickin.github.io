@@ -5,9 +5,12 @@ import { giscus } from "../site.config";
 {giscus.enabled && (
   <div class="giscus mt-16">
     <div class="giscus-placeholder">
-      <p class="text-sm opacity-80">Comments load only when you ask.</p>
-      <button class="comments-load-button mt-3" type="button">Load comments</button>
+      <p class="text-sm opacity-80">댓글 영역에 가까워지면 자동으로 불러옵니다.</p>
+      <p class="comments-load-status mt-3 text-sm">Preparing comments...</p>
       <p class="comments-load-error mt-3 text-sm" role="alert" hidden></p>
+      <button class="comments-retry-button mt-3" type="button" hidden>
+        댓글 다시 불러오기
+      </button>
     </div>
   </div>
   <script is:inline define:vars={{ giscus }}>
@@ -107,16 +110,20 @@ import { giscus } from "../site.config";
       if (!container) return;
 
       const placeholder = container.querySelector(".giscus-placeholder");
-      const button = container.querySelector(".comments-load-button");
+      const statusEl = container.querySelector(".comments-load-status");
       const errorEl = container.querySelector(".comments-load-error");
-      if (!(button instanceof HTMLButtonElement)) return;
+      const retryButton = container.querySelector(".comments-retry-button");
 
       let state = "idle";
       let mountPromise;
+      let observer;
 
       const setLoading = (loading) => {
-        button.disabled = loading;
-        button.textContent = loading ? "Loading..." : "Load comments";
+        if (!(statusEl instanceof HTMLElement)) return;
+        statusEl.hidden = false;
+        statusEl.textContent = loading
+          ? "Loading comments..."
+          : "댓글을 준비 중입니다.";
       };
 
       const setError = (message) => {
@@ -130,6 +137,11 @@ import { giscus } from "../site.config";
         errorEl.textContent = message;
       };
 
+      const setRetryVisible = (visible) => {
+        if (!(retryButton instanceof HTMLButtonElement)) return;
+        retryButton.hidden = !visible;
+      };
+
       const mount = async () => {
         if (state === "loaded") return;
         if (mountPromise) return mountPromise;
@@ -139,6 +151,7 @@ import { giscus } from "../site.config";
           state = "loaded";
           setLoading(false);
           setError("");
+          setRetryVisible(false);
           if (placeholder) placeholder.remove();
           postThemeToGiscus(getTheme());
           return;
@@ -147,6 +160,7 @@ import { giscus } from "../site.config";
         state = "loading";
         setLoading(true);
         setError("");
+        setRetryVisible(false);
 
         mountPromise = (async () => {
           try {
@@ -165,7 +179,10 @@ import { giscus } from "../site.config";
             state = "loaded";
             setLoading(false);
             setError("");
+            setRetryVisible(false);
             if (placeholder) placeholder.remove();
+            container.classList.add("giscus-loaded");
+            container.style.containIntrinsicSize = "auto";
 
             // Ensure theme is correct even if it changed during load.
             postThemeToGiscus(getTheme());
@@ -175,6 +192,7 @@ import { giscus } from "../site.config";
             setError(
               "Failed to load comments. Check your connection and try again."
             );
+            setRetryVisible(true);
             if (!document.querySelector("iframe.giscus-frame")) {
               container
                 .querySelectorAll(`script[src="${GISCUS_SCRIPT_URL}"]`)
@@ -187,9 +205,46 @@ import { giscus } from "../site.config";
         return mountPromise;
       };
 
-      button.addEventListener("click", () => {
+      const startObserving = () => {
+        if (!("IntersectionObserver" in window)) {
+          void mount();
+          return;
+        }
+
+        observer = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue;
+              observer?.disconnect();
+              observer = undefined;
+              void mount();
+              break;
+            }
+          },
+          {
+            root: null,
+            rootMargin: "600px 0px 400px 0px",
+            threshold: 0,
+          }
+        );
+
+        observer.observe(container);
+      };
+
+      if (retryButton instanceof HTMLButtonElement) {
+        retryButton.addEventListener("click", () => {
+          setError("");
+          setRetryVisible(false);
+          void mount();
+        });
+      }
+
+      if (document.querySelector("iframe.giscus-frame")) {
         void mount();
-      });
+        return;
+      }
+
+      startObserving();
     };
 
     if (document.readyState === "loading") {
@@ -198,4 +253,18 @@ import { giscus } from "../site.config";
       setup();
     }
   </script>
+  <style>
+    .giscus {
+      content-visibility: auto;
+      contain-intrinsic-size: 640px;
+    }
+
+    .giscus.giscus-loaded {
+      contain-intrinsic-size: auto;
+    }
+
+    .giscus .giscus-frame {
+      min-height: 360px;
+    }
+  </style>
 )}
