@@ -6,4 +6,5 @@ dist
 .env.*
 public/posts/
 .claude/
+.sisyphus/
 nul
