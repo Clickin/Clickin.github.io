@@ -66,7 +66,7 @@ const hasGaMeasurementId = typeof gaMeasurementId === "string" && gaMeasurementI
   </head>
   <body class="min-h-screen flex flex-col">
     <Header />
-    <main class={`${mainClass} flex-1 py-8`} data-pagefind-body>
+    <main class={`${mainClass} flex-1 py-8 break-keep break-words`} data-pagefind-body>
       <slot />
     </main>
     <footer class="container-blog py-8 text-center text-sm text-[var(--color-text-secondary)] border-t border-[var(--color-border)]">
