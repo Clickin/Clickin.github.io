@@ -1,0 +1,1130 @@
+---
+title: "세션 기반 인증 — 인메모리 & Redis | Micronaut Security 완전 가이드"
+description: "Micronaut Security로 세션 기반 인증을 구현하는 두 가지 방법(인메모리, Redis)을 비교하고, AuthenticationProvider, CSRF 방어, 라우트 보호까지 실전 예제로 설명합니다."
+date: 2026-02-22
+category: "dev"
+tags: ["Java", "Micronaut", "Security", "Session", "Redis", "Authentication", "CSRF"]
+series: "micronaut-guide"
+order: 9
+draft: false
+publish: true
+---
+
+8편에서 Thymeleaf로 서버사이드 렌더링을 구현하면서 로그인 폼을 미리 만들었습니다. 이번 편에서는 그 폼에 실제 인증을 붙입니다. Micronaut Security 모듈로 세션 기반 로그인을 구현하고, 인메모리 방식과 Redis 방식을 비교합니다. CSRF 방어와 라우트 보호도 함께 다룹니다.
+
+---
+
+## Micronaut Security 개요
+
+### 지원 인증 방식 비교
+
+Micronaut Security는 세 가지 주요 인증 방식을 지원합니다.
+
+| 방식 | 모듈 | 세션 저장 | 클라이언트 상태 | 주요 사용 사례 |
+|------|------|---------|--------------|-------------|
+| Session | `micronaut-security-session` | 서버 (메모리/Redis) | Cookie (세션 ID) | SSR 웹 애플리케이션 |
+| JWT | `micronaut-security-jwt` | 없음 (stateless) | 토큰 직접 보관 | REST API, SPA, 마이크로서비스 |
+| Basic | `micronaut-security` 기본 포함 | 없음 | Authorization 헤더 | API 테스트, 내부 서비스 |
+| OAuth2 | `micronaut-security-oauth2` | 외부 Provider | 토큰 | 소셜 로그인, SSO |
+
+**JWT vs Session 선택 기준:**
+
+JWT는 서버가 세션 상태를 저장하지 않아 수평 확장이 자연스럽습니다. 그러나 토큰 무효화(로그아웃)가 어렵고, 토큰 크기가 크며, 탈취된 토큰을 즉시 차단할 방법이 없습니다. SPA(React, Vue)나 모바일 앱처럼 REST API를 직접 호출하는 클라이언트에 적합합니다.
+
+Session 방식은 서버가 세션을 관리하므로 즉각적인 로그아웃과 세션 무효화가 가능합니다. 브라우저 기반 SSR 애플리케이션에 자연스럽고, CSRF 방어와 조합이 잘 됩니다. 수평 확장 시 세션 저장소를 공유해야 하는데, Redis가 표준 해법입니다.
+
+**이 편에서 다루는 것:** 8편에서 만든 Thymeleaf SSR 애플리케이션에 세션 기반 Form Login을 추가합니다.
+
+---
+
+## 의존성 설정
+
+### build.gradle.kts (Kotlin DSL)
+
+```kotlin
+plugins {
+    id("io.micronaut.application") version "4.4.2"
+}
+
+group = "com.example"
+version = "0.1"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Micronaut 핵심
+    annotationProcessor("io.micronaut:micronaut-http-validation")
+    annotationProcessor("io.micronaut.validation:micronaut-validation-processor")
+    annotationProcessor("io.micronaut.security:micronaut-security-annotations")
+    implementation("io.micronaut:micronaut-http-server-netty")
+    implementation("io.micronaut:micronaut-jackson-databind")
+
+    // Views (8편)
+    implementation("io.micronaut.views:micronaut-views-thymeleaf")
+
+    // Security — 세션 기반
+    implementation("io.micronaut.security:micronaut-security")
+    implementation("io.micronaut.security:micronaut-security-session")
+
+    // CSRF 방어 — 세션 기반 인증에 별도 모듈 필요
+    implementation("io.micronaut.security:micronaut-security-csrf")
+
+    // Session 저장 — 기본 HTTP 세션
+    implementation("io.micronaut:micronaut-session")
+
+    // Redis 세션 (구현체 2에서 사용 — 먼저 선언해두고 application.yml로 전환)
+    // implementation("io.micronaut.redis:micronaut-redis-lettuce")
+
+    // Validation
+    implementation("io.micronaut.validation:micronaut-validation")
+
+    // Lombok
+    compileOnly("org.projectlombok:lombok")
+    annotationProcessor("org.projectlombok:lombok")
+
+    // 런타임
+    runtimeOnly("ch.qos.logback:logback-classic")
+}
+
+java {
+    sourceCompatibility = JavaVersion.toVersion("21")
+    targetCompatibility = JavaVersion.toVersion("21")
+}
+
+micronaut {
+    runtime("netty")
+    testRuntime("junit5")
+    processing {
+        incremental(true)
+        annotations("com.example.*")
+    }
+}
+```
+
+`micronaut-security-annotations`는 `@Secured` 어노테이션을 컴파일 타임에 처리합니다. annotation processor로 선언해야 합니다. `micronaut-security-session`은 Form Login 지원과 세션 기반 인증 인터셉터를 포함합니다.
+
+---
+
+## 세션 기반 인증 흐름
+
+### 로그인 흐름 (ASCII 다이어그램)
+
+```
+브라우저                Micronaut 서버             세션 저장소
+  |                          |                         |
+  |--- GET /products/new --->|                         |
+  |                          | (인증 확인: 세션 없음)   |
+  |<-- 302 /login?unauthorized|                        |
+  |                          |                         |
+  |--- GET /login ---------->|                         |
+  |<-- 200 OK (로그인 폼) ----|                         |
+  |                          |                         |
+  |--- POST /login           |                         |
+  |    username=user         |                         |
+  |    password=pass ------->|                         |
+  |                          |-- authenticate() ------>|
+  |                          | AuthenticationProvider  |
+  |                          |   검증 성공              |
+  |                          |-- 세션 생성 ------------>|
+  |                          |   SESSION_ID=abc123     |
+  |<-- 302 /products --------|                         |
+  |    Set-Cookie: SESSION=abc123                      |
+  |                          |                         |
+  |--- GET /products         |                         |
+  |    Cookie: SESSION=abc123|                         |
+  |                          |-- 세션 조회 ------------>|
+  |                          |<-- UserDetails ----------|
+  |<-- 200 OK (목록 페이지) --|                         |
+```
+
+### 로그아웃 흐름
+
+```
+브라우저                Micronaut 서버             세션 저장소
+  |                          |                         |
+  |--- POST /logout          |                         |
+  |    Cookie: SESSION=abc123|                         |
+  |                          |-- 세션 삭제 ------------>|
+  |                          |   SESSION_ID=abc123 삭제 |
+  |<-- 302 /login?loggedOut --|                         |
+  |    Set-Cookie: SESSION=; Expires=...               |
+  |                          |                         |
+```
+
+로그아웃은 서버에서 세션을 삭제하고, 브라우저의 세션 쿠키를 만료시킵니다. JWT와 달리 서버 측에서 즉시 인증 상태를 무효화할 수 있는 것이 세션 방식의 강점입니다.
+
+---
+
+## AuthenticationProvider 구현
+
+### AuthenticationProvider 인터페이스
+
+Micronaut Security에서 사용자 인증 로직은 `HttpRequestAuthenticationProvider<B>` 인터페이스를 구현해서 제공합니다.[^auth-provider]
+
+```java
+package io.micronaut.security.authentication;
+
+public interface HttpRequestAuthenticationProvider<B> {
+    /**
+     * 주어진 요청과 자격증명으로 인증을 수행합니다.
+     * @return AuthenticationResponse — 성공 또는 실패
+     */
+    AuthenticationResponse authenticate(
+        @Nullable HttpRequest<B> httpRequest,
+        AuthenticationRequest<String, String> authenticationRequest
+    );
+}
+```
+
+`authenticate()` 메서드는 `AuthenticationResponse`를 직접 반환하는 동기(imperative) 방식입니다. Micronaut Security 4.x에서는 이 인터페이스가 권장 방식이며, 기존의 `Publisher<AuthenticationResponse>`를 반환하는 reactive `AuthenticationProvider`는 deprecated 되었습니다.
+
+[^auth-provider]: Micronaut Security 4.x 기준. [공식 가이드 — Session based authentication](https://guides.micronaut.io/latest/micronaut-security-session-gradle-kotlin.html) 참조.
+
+반환값:
+- `AuthenticationResponse.success(username)` — 인증 성공
+- `AuthenticationResponse.success(username, roles, attributes)` — 역할과 속성 포함 성공
+- `AuthenticationResponse.failure()` — 인증 실패 (기본 메시지)
+- `AuthenticationResponse.failure(AuthenticationFailureReason.CREDENTIALS_DO_NOT_MATCH)` — 실패 이유 명시
+
+---
+
+## 구현체 1: 인메모리 방식
+
+개발과 테스트에 사용하는 가장 단순한 구현입니다. 사용자 정보를 JVM 힙에 보관합니다.
+
+### 사용자 저장소 (인메모리)
+
+```java
+package com.example.auth;
+
+import io.micronaut.core.annotation.Introspected;
+import jakarta.inject.Singleton;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Singleton
+public class InMemoryUserRepository {
+
+    // username → UserRecord
+    private final Map<String, UserRecord> users = new ConcurrentHashMap<>();
+
+    public InMemoryUserRepository() {
+        // 개발용 초기 데이터
+        // 프로덕션에서는 DB에서 로드
+        users.put("admin@example.com", new UserRecord(
+            "admin@example.com",
+            // BCrypt 해시: "admin123"
+            "$2a$12$K/1uwQuMd4WUOW/yxzFBtegXP6RIk10oJ3P0RHWDhipd/ysKaaTAO",
+            List.of("ROLE_ADMIN", "ROLE_USER")
+        ));
+        users.put("user@example.com", new UserRecord(
+            "user@example.com",
+            // BCrypt 해시: "user123"
+            "$2a$12$tkNt9Ah6TjYT.d/RLQBGRupdA9GqL43xkhRFH0qM2UQ506/Traxnq",
+            List.of("ROLE_USER")
+        ));
+    }
+
+    public Optional<UserRecord> findByUsername(String username) {
+        return Optional.ofNullable(users.get(username));
+    }
+
+    @Introspected
+    public record UserRecord(
+        String username,
+        String passwordHash,
+        List<String> roles
+    ) {}
+}
+```
+
+### AuthenticationProvider 구현체
+
+```java
+package com.example.auth;
+
+import io.micronaut.core.annotation.Nullable;
+import io.micronaut.http.HttpRequest;
+import io.micronaut.security.authentication.AuthenticationFailureReason;
+import io.micronaut.security.authentication.HttpRequestAuthenticationProvider;
+import io.micronaut.security.authentication.AuthenticationRequest;
+import io.micronaut.security.authentication.AuthenticationResponse;
+import jakarta.inject.Singleton;
+
+import java.util.Map;
+
+@Singleton
+public class InMemoryAuthenticationProvider
+        implements HttpRequestAuthenticationProvider<Object> {
+
+    private final InMemoryUserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public InMemoryAuthenticationProvider(
+            InMemoryUserRepository userRepository,
+            PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Override
+    public AuthenticationResponse authenticate(
+            @Nullable HttpRequest<Object> httpRequest,
+            AuthenticationRequest<String, String> authenticationRequest) {
+
+        String username = authenticationRequest.getIdentity();
+        String rawPassword = authenticationRequest.getSecret();
+
+        // 1. 사용자 조회
+        InMemoryUserRepository.UserRecord user = userRepository.findByUsername(username)
+            .orElse(null);
+
+        if (user == null) {
+            return AuthenticationResponse.failure(
+                AuthenticationFailureReason.USER_NOT_FOUND
+            );
+        }
+
+        // 2. 비밀번호 검증
+        if (!passwordEncoder.matches(rawPassword, user.passwordHash())) {
+            return AuthenticationResponse.failure(
+                AuthenticationFailureReason.CREDENTIALS_DO_NOT_MATCH
+            );
+        }
+
+        // 3. 인증 성공 — 역할과 속성 포함
+        return AuthenticationResponse.success(
+            user.username(),
+            user.roles(),
+            Map.of("email", user.username())
+        );
+    }
+}
+```
+
+### 비밀번호 인코더
+
+```java
+package com.example.auth;
+
+import jakarta.inject.Singleton;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+@Singleton
+public class PasswordEncoder {
+
+    private final BCryptPasswordEncoder bcrypt = new BCryptPasswordEncoder();
+
+    public String encode(String rawPassword) {
+        return bcrypt.encode(rawPassword);
+    }
+
+    public boolean matches(String rawPassword, String encodedPassword) {
+        return bcrypt.matches(rawPassword, encodedPassword);
+    }
+}
+```
+
+BCrypt를 사용하려면 `build.gradle`에 의존성을 추가합니다.
+
+```kotlin
+// build.gradle.kts
+implementation("org.springframework.security:spring-security-crypto:6.3.3")
+// BCrypt가 필요한 commons-logging
+runtimeOnly("commons-logging:commons-logging:1.3.3")
+```
+
+Spring Security 전체가 아닌 `spring-security-crypto` 모듈만 가져옵니다. Spring의 BCrypt 구현은 독립적으로 사용할 수 있습니다.
+
+### application.yml — 인메모리 방식 설정
+
+```yaml
+micronaut:
+  application:
+    name: product-store
+
+  # 세션 설정
+  session:
+    http:
+      cookie:
+        same-site: lax
+        http-only: true
+        secure: false  # HTTPS 환경에서는 true로 설정
+      max-inactive-interval: 30m  # 세션 타임아웃: 30분
+
+  # Security 설정
+  security:
+    enabled: true
+    authentication: session
+    intercept-url-map:
+      - pattern: /static/**
+        access:
+          - isAnonymous()
+      - pattern: /login
+        access:
+          - isAnonymous()
+      - pattern: /logout
+        http-method: POST
+        access:
+          - isAuthenticated()
+      - pattern: /**
+        access:
+          - isAuthenticated()
+    redirect:
+      login-success: /products        # 로그인 성공 후 이동
+      login-failure: /login?loginFailed=true
+      logout: /login?loggedOut=true
+      unauthorized:
+        url: /login?unauthorized=true  # 미인증 접근 시 리다이렉트
+      forbidden:
+        url: /error/403                # 인증됐지만 권한 부족 시
+    session:
+      enabled: true
+```
+
+`micronaut.security.intercept-url-map`은 URL 패턴별 접근 규칙을 정의합니다. 패턴은 위에서 아래로 순서대로 매칭됩니다. `/static/**`와 `/login`은 비인증 사용자도 접근할 수 있어야 합니다. 나머지 `/**`는 인증 필요로 설정합니다. `redirect` 블록에서 로그인 성공/실패, 로그아웃, 미인증/권한 부족 시 리다이렉트 URL을 한곳에서 관리합니다.
+
+### 인메모리 방식의 한계
+
+인메모리 방식은 단순하지만 두 가지 근본적인 한계가 있습니다.
+
+**한계 1: 서버 재시작 시 세션 소멸.** 세션 데이터가 JVM 힙에 있으므로, 애플리케이션을 재시작하면 모든 사용자가 로그아웃됩니다. 배포 중 사용자 경험이 나빠집니다.
+
+**한계 2: 수평 확장 불가.** 서버 인스턴스가 두 대라면, 사용자 A의 세션이 인스턴스 1에만 있습니다. 로드 밸런서가 A의 다음 요청을 인스턴스 2로 보내면 세션을 찾지 못해 로그아웃됩니다.
+
+```
+로드 밸런서
+     |
+  -------
+  |     |
+서버1   서버2
+세션A   세션 없음 ← 문제 발생
+```
+
+Sticky Session(같은 클라이언트는 항상 같은 서버로)으로 우회할 수 있지만, 특정 서버에 부하가 집중되고 서버 장애 시 세션이 유실됩니다.
+
+개발/테스트 환경에서는 인메모리 방식으로 충분합니다. 프로덕션은 Redis 방식을 사용합니다.
+
+---
+
+## 구현체 2: Redis Session 방식
+
+Redis를 세션 저장소로 사용하면 수평 확장 문제가 해결됩니다.
+
+```
+로드 밸런서
+     |
+  -------
+  |     |
+서버1   서버2
+  \     /
+   Redis
+  세션A, 세션B ...
+```
+
+서버 어느 인스턴스에 요청이 가더라도 Redis에서 세션을 찾습니다.
+
+### 추가 의존성
+
+```kotlin
+// build.gradle.kts
+implementation("io.micronaut.redis:micronaut-redis-lettuce")
+```
+
+`io.micronaut.redis:micronaut-redis-lettuce`는 Micronaut의 Redis 통합 모듈입니다. Lettuce는 Netty 기반의 비동기 Redis 클라이언트로, Micronaut의 EventLoop와 자연스럽게 통합됩니다.
+
+### Docker Compose로 Redis 로컬 실행
+
+개발 환경에서 Redis를 빠르게 띄우는 방법입니다.
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: product-store-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+```
+
+```bash
+docker compose up -d redis
+docker compose exec redis redis-cli ping
+# PONG
+```
+
+### application.yml — Redis 방식 설정
+
+인메모리 설정에서 세션 저장소를 Redis로 교체합니다.
+
+```yaml
+micronaut:
+  application:
+    name: product-store
+
+  # Redis 세션 저장소
+  session:
+    http:
+      cookie:
+        same-site: lax
+        http-only: true
+        secure: false  # HTTPS 환경에서 true
+      max-inactive-interval: 30m
+      redis:
+        enabled: true
+        namespace: "product-store:sessions:"   # Redis key prefix
+        write-mode: background                  # 세션 변경을 비동기로 저장
+        # active-sessions-enabled: true        # 활성 세션 목록 추적 (선택)
+
+  security:
+    enabled: true
+    authentication: session
+    intercept-url-map:
+      - pattern: /static/**
+        access:
+          - isAnonymous()
+      - pattern: /login
+        access:
+          - isAnonymous()
+      - pattern: /logout
+        http-method: POST
+        access:
+          - isAuthenticated()
+      - pattern: /**
+        access:
+          - isAuthenticated()
+    redirect:
+      login-success: /products
+      login-failure: /login?loginFailed=true
+      logout: /login?loggedOut=true
+      unauthorized:
+        url: /login?unauthorized=true
+    session:
+      enabled: true
+
+# Redis 연결 설정
+redis:
+  uri: redis://localhost:6379
+  timeout: 5s
+  ssl: false
+```
+
+`write-mode: background`는 응답을 클라이언트에 먼저 보낸 뒤 세션 데이터를 Redis에 저장합니다. 세션 저장이 응답 지연에 영향을 주지 않는 대신, 저장 실패 시 세션 데이터가 유실될 수 있습니다. `write-mode: synchronous`로 설정하면 세션 저장이 완료된 후 응답을 보내므로 일관성은 높아지지만 응답 시간이 늘어납니다.
+
+### 세션 직렬화 설정
+
+Micronaut은 기본적으로 Jackson을 사용해 세션 데이터를 JSON으로 직렬화합니다. `UserDetails` 객체가 올바르게 직렬화/역직렬화되도록 합니다.
+
+```yaml
+# application.yml에 추가
+jackson:
+  serialization:
+    write-dates-as-timestamps: false
+  deserialization:
+    fail-on-unknown-properties: false
+```
+
+Redis에 저장되는 세션 키와 값을 확인하려면:
+
+```bash
+docker compose exec redis redis-cli
+> KEYS product-store:sessions:*
+1) "product-store:sessions:abc123def456..."
+
+> HGETALL "product-store:sessions:abc123def456..."
+1) "micronaut.security.authentication.username"
+2) "\"admin@example.com\""
+3) "micronaut.security.authentication.roles"
+4) "[\"ROLE_ADMIN\",\"ROLE_USER\"]"
+5) "lastAccessedTime"
+6) "1740000000000"
+```
+
+### Redis TTL 설정 확인
+
+`max-inactive-interval: 30m`으로 설정하면 Micronaut이 Redis 키의 TTL을 30분으로 설정합니다. 마지막 접근 후 30분이 지나면 Redis가 자동으로 키를 삭제합니다.
+
+```bash
+> TTL "product-store:sessions:abc123..."
+1800  # 1800초 = 30분
+```
+
+---
+
+## 로그인/로그아웃 페이지 구성
+
+### 컨트롤러
+
+Micronaut Security는 `/login` POST를 자동으로 처리합니다. 로그인 폼 GET 요청만 컨트롤러에서 처리하면 됩니다.
+
+```java
+package com.example.auth;
+
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.security.annotation.Secured;
+import io.micronaut.security.rules.SecurityRule;
+import io.micronaut.views.View;
+
+import java.util.Map;
+
+@Controller
+@Secured(SecurityRule.IS_ANONYMOUS)  // 로그인 페이지는 인증 없이 접근 가능
+public class AuthController {
+
+    @View("auth/login")
+    @Get("/login")
+    public Map<String, Object> loginForm() {
+        return Map.of("pageTitle", "로그인");
+    }
+}
+```
+
+로그아웃은 `POST /logout`으로 요청하면 Micronaut Security가 자동으로 처리합니다. 별도 컨트롤러가 필요 없습니다.
+
+### 로그인 폼 (views/auth/login.html)
+
+8편에서 미리 만들었던 로그인 폼을 완성합니다.
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="${pageTitle} + ' — Product Store'">로그인 — Product Store</title>
+    <link rel="stylesheet" th:href="@{/static/css/main.css}">
+</head>
+<body class="auth-page">
+<div class="login-container">
+    <div class="login-card">
+        <h1 class="login-title" th:text="${pageTitle}">로그인</h1>
+
+        <!-- 로그인 실패 알림 -->
+        <div th:if="${param.loginFailed}" class="alert alert-error">
+            이메일 또는 비밀번호가 올바르지 않습니다.
+        </div>
+
+        <!-- 세션 만료 후 재접근 -->
+        <div th:if="${param.unauthorized}" class="alert alert-warning">
+            로그인이 필요한 페이지입니다.
+        </div>
+
+        <!-- 로그아웃 후 알림 -->
+        <div th:if="${param.loggedOut}" class="alert alert-info">
+            로그아웃되었습니다.
+        </div>
+
+        <!--
+            Micronaut Security가 POST /login을 자동으로 처리합니다.
+            폼 필드: username, password (변경 가능)
+        -->
+        <form action="/login" method="post" class="login-form">
+            <!-- CSRF 토큰 (아래 CSRF 섹션에서 활성화) -->
+            <input type="hidden"
+                   th:if="${_csrf != null}"
+                   th:name="${_csrf.parameterName}"
+                   th:value="${_csrf.token}">
+
+            <div class="form-group">
+                <label for="username">이메일</label>
+                <input type="email"
+                       id="username"
+                       name="username"
+                       autocomplete="username email"
+                       autofocus
+                       required
+                       placeholder="user@example.com"
+                       class="form-control">
+            </div>
+
+            <div class="form-group">
+                <label for="password">비밀번호</label>
+                <input type="password"
+                       id="password"
+                       name="password"
+                       autocomplete="current-password"
+                       required
+                       class="form-control">
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-full">
+                로그인
+            </button>
+        </form>
+    </div>
+</div>
+</body>
+</html>
+```
+
+### 로그아웃 버튼 (header fragment)
+
+8편에서 만든 헤더 fragment를 업데이트합니다.
+
+```html
+<!-- views/layout/header.html 중 auth-area 부분 -->
+<div class="auth-area">
+    <!-- 인증된 사용자 (Micronaut Security의 SecurityViewModelProcessor가 모델에 'security' 키로 Authentication 자동 주입) -->
+    <th:block th:if="${security != null}">
+        <span th:text="${security.name}" class="username">
+            사용자명
+        </span>
+        <form action="/logout" method="post" style="display:inline">
+            <!-- CSRF 토큰 -->
+            <input type="hidden"
+                   th:if="${_csrf != null}"
+                   th:name="${_csrf.parameterName}"
+                   th:value="${_csrf.token}">
+            <button type="submit" class="btn btn-text">로그아웃</button>
+        </form>
+    </th:block>
+
+    <!-- 비인증 사용자 -->
+    <a th:unless="${security != null}"
+       th:href="@{/login}"
+       class="btn btn-secondary">
+        로그인
+    </a>
+</div>
+```
+
+`${security}`는 Micronaut Security의 `SecurityViewModelProcessor`가 `@View` 어노테이션으로 렌더링되는 뷰 모델에 자동으로 주입하는 `Authentication` 객체입니다. `security.name`으로 인증된 사용자명을 참조합니다. `#request.userPrincipal`은 Jakarta Servlet API 기반이므로 Netty(Servlet 미사용) 환경에서 null을 반환합니다.
+
+---
+
+## 라우트 보호
+
+### 방법 1: @Secured 어노테이션
+
+컨트롤러 클래스 또는 메서드에 `@Secured`를 붙입니다.
+
+```java
+package com.example.product;
+
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.MediaType;
+import io.micronaut.http.annotation.Body;
+import io.micronaut.http.annotation.Consumes;
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.http.annotation.Post;
+import io.micronaut.security.annotation.Secured;
+import io.micronaut.security.rules.SecurityRule;
+import io.micronaut.views.View;
+import jakarta.validation.Valid;
+
+import java.net.URI;
+import java.security.Principal;
+import java.util.Map;
+
+// 클래스 레벨: 이 컨트롤러의 모든 엔드포인트에 인증 필요
+@Secured(SecurityRule.IS_AUTHENTICATED)
+@Controller("/products")
+public class ProductController {
+
+    private final ProductService productService;
+
+    public ProductController(ProductService productService) {
+        this.productService = productService;
+    }
+
+    // 인증된 사용자만 접근 가능 (클래스 레벨 설정 상속)
+    @View("product/list")
+    @Get
+    public Map<String, Object> list(Principal principal) {
+        return Map.of(
+            "products", productService.findAll(),
+            "pageTitle", "상품 목록",
+            "currentUser", principal.getName()
+        );
+    }
+
+    // ROLE_ADMIN만 상품 등록 가능
+    @Secured("ROLE_ADMIN")
+    @View("product/form")
+    @Get("/new")
+    public Map<String, Object> newForm() {
+        return Map.of(
+            "productForm", new ProductForm(),
+            "pageTitle", "상품 등록",
+            "formAction", "/products",
+            "errors", Map.of()
+        );
+    }
+
+    @Secured("ROLE_ADMIN")
+    @Post
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    public HttpResponse<?> create(@Body @Valid ProductForm form) {
+        productService.create(form);
+        return HttpResponse.seeOther(URI.create("/products?saved=true"));
+    }
+
+    // 모든 인증 사용자가 상품 상세 조회 가능
+    @View("product/detail")
+    @Get("/{id}")
+    public Map<String, Object> detail(Long id) {
+        Product product = productService.findById(id)
+            .orElseThrow(() -> new ProductNotFoundException(id));
+        return Map.of("product", product);
+    }
+}
+```
+
+`@Secured` 값 옵션:
+
+| 값 | 의미 |
+|---|------|
+| `SecurityRule.IS_AUTHENTICATED` | 인증된 사용자면 누구나 |
+| `SecurityRule.IS_ANONYMOUS` | 비인증 사용자만 (로그인 페이지 등) |
+| `"ROLE_ADMIN"` | ROLE_ADMIN 역할을 가진 사용자 |
+| `{"ROLE_ADMIN", "ROLE_MANAGER"}` | 둘 중 하나의 역할 (OR) |
+
+### 방법 2: intercept-url-map (application.yml)
+
+`@Secured` 없이 YAML 설정으로 접근 규칙을 관리합니다. 코드를 바꾸지 않고 보안 설정을 조정할 수 있어 운영 환경에서 유연합니다.
+
+```yaml
+micronaut:
+  security:
+    intercept-url-map:
+      # 정적 리소스 — 누구나
+      - pattern: /static/**
+        access:
+          - isAnonymous()
+
+      # 로그인 페이지 — 비인증 사용자만
+      - pattern: /login
+        http-method: GET
+        access:
+          - isAnonymous()
+
+      # 상품 목록/상세 — 인증 필요
+      - pattern: /products
+        http-method: GET
+        access:
+          - isAuthenticated()
+
+      - pattern: /products/**
+        http-method: GET
+        access:
+          - isAuthenticated()
+
+      # 상품 등록/수정/삭제 — 관리자만
+      - pattern: /products
+        http-method: POST
+        access:
+          - hasRole('ROLE_ADMIN')
+
+      - pattern: /products/**
+        http-method: POST
+        access:
+          - hasRole('ROLE_ADMIN')
+
+      # 나머지 모든 요청 — 인증 필요
+      - pattern: /**
+        access:
+          - isAuthenticated()
+```
+
+`@Secured`와 `intercept-url-map`을 혼용하면 `@Secured`가 우선합니다. 일반적으로 하나의 방식으로 통일하는 것이 혼란을 줄입니다.
+
+### 403 Forbidden 처리
+
+인증은 됐지만 권한이 없는 경우(`ROLE_USER`가 `ROLE_ADMIN` 전용 페이지에 접근) `403 Forbidden`이 발생합니다. 사용자 친화적인 오류 페이지를 보여줍니다.
+
+```java
+package com.example.error;
+
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.HttpStatus;
+import io.micronaut.http.annotation.Produces;
+import io.micronaut.http.server.exceptions.ExceptionHandler;
+import io.micronaut.security.authentication.AuthorizationException;
+import io.micronaut.views.ModelAndView;
+import jakarta.inject.Singleton;
+
+import java.util.Map;
+
+@Singleton
+@Produces
+public class AuthorizationExceptionHandler
+        implements ExceptionHandler<AuthorizationException, HttpResponse<?>> {
+
+    @Override
+    public HttpResponse<?> handle(HttpRequest request, AuthorizationException exception) {
+        if (exception.isForbidden()) {
+            // 인증됐지만 권한 없음 → 403
+            Map<String, Object> model = Map.of(
+                "pageTitle", "접근 거부",
+                "message", "이 페이지에 접근할 권한이 없습니다."
+            );
+            return HttpResponse.status(HttpStatus.FORBIDDEN)
+                .body(new ModelAndView<>("error/403", model));
+        }
+        // 미인증 → 로그인 페이지로 리다이렉트 (Security 모듈이 처리)
+        return HttpResponse.redirect(
+            java.net.URI.create("/login?unauthorized=true")
+        );
+    }
+}
+```
+
+---
+
+## CSRF 방어
+
+### 왜 세션 기반 인증에서 CSRF가 필요한가
+
+CSRF(Cross-Site Request Forgery)는 세션 기반 인증의 고유한 취약점입니다.
+
+```
+공격 시나리오:
+
+1. 사용자가 product-store.com에 로그인 (세션 쿠키 발급)
+2. 같은 브라우저에서 evil.com 방문
+3. evil.com의 HTML에 숨겨진 폼이 자동 제출됨:
+
+   <form action="https://product-store.com/products/1/delete" method="post">
+   <input type="hidden" name="confirm" value="yes">
+   </form>
+   <script>document.forms[0].submit();</script>
+
+4. 브라우저는 product-store.com의 세션 쿠키를 자동으로 포함시켜 요청 전송
+5. 서버는 유효한 세션으로 인식하고 삭제 처리
+```
+
+브라우저가 자동으로 쿠키를 첨부하는 특성 때문에 발생합니다. JWT는 쿠키가 아닌 `Authorization` 헤더를 사용하므로 브라우저가 자동으로 첨부하지 않아 CSRF 취약점이 없습니다.
+
+CSRF 방어의 핵심은 **서버가 발급한 토큰을 폼에 포함시켜, 서버가 이 토큰을 검증**하는 것입니다. 다른 도메인의 페이지는 이 토큰을 알 수 없으므로 위조 요청을 만들 수 없습니다.
+
+### application.yml CSRF 설정
+
+```yaml
+micronaut:
+  security:
+    csrf:
+      enabled: true
+      # CSRF 토큰을 쿠키로도 전송 (JavaScript에서 읽어 헤더로 보낼 때 사용)
+      cookie-name: XSRF-TOKEN
+      # 폼 파라미터 이름 (th:name="${_csrf.parameterName}"으로 참조)
+      field-name: _csrf
+```
+
+`micronaut.security.csrf.enabled: true`를 설정하면 Micronaut이 자동으로:
+1. 상태 변경 요청(POST, PUT, DELETE, PATCH)에 CSRF 토큰을 검증합니다.
+2. `micronaut-views`와 함께 사용하면 폼 렌더링 시 CSRF 토큰 hidden input을 자동 삽입합니다.[^csrf-views]
+3. GET 요청은 CSRF 검증을 건너뜁니다.
+
+[^csrf-views]: Micronaut Views + Security CSRF 연동 시, `@View`로 렌더링되는 폼에 CSRF 토큰이 자동 포함됩니다. 아래 예제는 수동으로 토큰을 삽입하는 방식을 보여줍니다.
+
+### 폼에 CSRF 토큰 삽입
+
+8편에서 만든 폼 템플릿에 CSRF 토큰을 추가합니다.
+
+```html
+<!-- 상품 등록 폼 (views/product/form.html) -->
+<form th:action="${formAction}"
+      th:object="${productForm}"
+      method="post"
+      class="product-form">
+
+    <!-- CSRF 토큰 — 반드시 포함 -->
+    <input type="hidden"
+           th:name="${_csrf.parameterName}"
+           th:value="${_csrf.token}">
+
+    <!-- 나머지 폼 필드 ... -->
+    <div class="form-group">
+        <label for="name">상품명</label>
+        <input type="text" id="name" name="name" th:value="*{name}">
+    </div>
+
+    <button type="submit">저장</button>
+</form>
+```
+
+삭제 폼도 POST를 사용하므로 CSRF 토큰이 필요합니다.
+
+```html
+<!-- 삭제 버튼 — 반드시 POST + CSRF -->
+<form th:action="@{/products/{id}/delete(id=${p.id})}"
+      method="post"
+      onsubmit="return confirm('삭제하시겠습니까?')">
+    <input type="hidden"
+           th:name="${_csrf.parameterName}"
+           th:value="${_csrf.token}">
+    <button type="submit" class="btn btn-danger">삭제</button>
+</form>
+```
+
+### JavaScript에서 CSRF 토큰 사용 (AJAX 요청)
+
+Thymeleaf 폼 외에 JavaScript `fetch`나 `XMLHttpRequest`로 POST 요청을 보낼 때도 CSRF 토큰을 포함해야 합니다.
+
+```html
+<!-- 페이지 어딘가에 메타 태그로 토큰 삽입 -->
+<meta name="csrf-token"
+      th:content="${_csrf.token}"
+      id="csrf-token">
+<meta name="csrf-param"
+      th:content="${_csrf.parameterName}"
+      id="csrf-param">
+```
+
+```javascript
+// main.js
+const csrfToken = document.getElementById('csrf-token')?.content;
+const csrfParam = document.getElementById('csrf-param')?.content;
+
+async function deleteProduct(productId) {
+    const formData = new FormData();
+    if (csrfToken && csrfParam) {
+        formData.append(csrfParam, csrfToken);
+    }
+
+    const response = await fetch(`/products/${productId}/delete`, {
+        method: 'POST',
+        body: formData
+    });
+
+    if (response.redirected) {
+        window.location.href = response.url;
+    }
+}
+```
+
+또는 `SameSite=Lax` 쿠키 설정으로 대부분의 CSRF 공격을 방어할 수 있습니다. `SameSite=Lax`는 다른 사이트에서 시작된 GET 방식의 최상위 탐색(link 클릭 등)에는 쿠키를 허용하지만, 다른 사이트의 POST 폼 제출이나 AJAX 요청에는 쿠키를 첨부하지 않습니다. 단, 일부 엣지 케이스(서브도메인 간 요청 등)가 있으므로, CSRF 토큰과 함께 사용하는 것이 가장 안전합니다.
+
+---
+
+## 두 방식 비교 요약
+
+| 항목 | 인메모리 방식 | Redis 방식 |
+|------|------------|----------|
+| 세션 저장소 | JVM 힙 (HttpSessionStore) | Redis 서버 |
+| 수평 확장 | 불가 (Sticky Session 필요) | 가능 (모든 서버가 Redis 공유) |
+| 서버 재시작 후 세션 유지 | 불가 (세션 소멸) | 유지 (TTL 내에서) |
+| 설정 복잡도 | 낮음 (추가 설정 없음) | 보통 (Redis 연결 + 직렬화 설정) |
+| 운영 의존성 | 없음 | Redis 인프라 필요 |
+| 메모리 사용 | JVM 힙 증가 | JVM 힙 절약, Redis 메모리 사용 |
+| 개발/테스트 적합성 | 매우 적합 | Docker로 쉽게 구성 가능 |
+| 프로덕션 적합성 | 단일 서버만 | 다중 서버 가능 |
+| 세션 모니터링 | 어렵 (JVM 내부) | 용이 (redis-cli, RedisInsight) |
+
+**결론: 개발 시작은 인메모리로, 스테이징/프로덕션은 Redis로.**
+
+`application-dev.yml`과 `application-prod.yml`을 분리하면 코드 변경 없이 환경별로 전환할 수 있습니다.
+
+```yaml
+# application-dev.yml — 인메모리
+micronaut:
+  session:
+    http:
+      max-inactive-interval: 30m
+
+# application-prod.yml — Redis
+micronaut:
+  session:
+    http:
+      max-inactive-interval: 30m
+      redis:
+        enabled: true
+        namespace: "product-store:sessions:"
+
+redis:
+  uri: ${REDIS_URI:redis://localhost:6379}
+```
+
+환경 변수 `MICRONAUT_ENVIRONMENTS=prod`를 설정하면 `application-prod.yml`이 `application.yml`을 오버라이드합니다.
+
+---
+
+## 전체 동작 확인
+
+애플리케이션을 시작하고 동작을 확인합니다.
+
+```bash
+# 인메모리 방식으로 시작
+./gradlew run
+
+# Redis 방식으로 시작 (Docker Redis 필요)
+docker compose up -d redis
+MICRONAUT_ENVIRONMENTS=prod ./gradlew run
+```
+
+접속 테스트:
+
+```
+1. http://localhost:8080/products 접속
+   → /login?unauthorized 으로 리다이렉트
+
+2. admin@example.com / admin123으로 로그인
+   → /products 페이지 표시 (상품 목록)
+
+3. "상품 등록" 클릭 → ROLE_ADMIN이므로 접근 가능
+   → 폼 작성 후 제출 → CSRF 검증 통과 → 목록으로 리다이렉트
+
+4. user@example.com / user123으로 로그인
+   → "상품 등록" 클릭 → ROLE_USER, 403 Forbidden
+
+5. 로그아웃 버튼 클릭 (POST /logout + CSRF)
+   → /login?loggedOut 리다이렉트
+```
+
+---
+
+## 시리즈 마무리
+
+6편부터 9편까지 Micronaut의 실전 구현을 다뤘습니다.
+
+| 편 | 주제 | 핵심 기술 |
+|---|------|---------|
+| 6편 | Micronaut Data JDBC | JDBC, Repository, 트랜잭션 |
+| 7편 | 선언적 HTTP Client | `@Client`, Virtual Thread 연동 |
+| 8편 | SSR — Thymeleaf Views | 폼 처리, Bean Validation, i18n |
+| 9편 | 세션 기반 인증 | Security, Redis, CSRF |
+
+1편에서 "AOT의 시대를 열다"며 시작한 이 시리즈는 Micronaut의 역사적 맥락(1편), 첫 프로젝트(2편), 내부 동작(3편), Spring 비교(4편), HTTP 서버 모델과 Virtual Thread(5편)를 거쳐 실전 구현까지 완주했습니다.
+
+### 다음 단계 제안
+
+**GraalVM Native Image.** Micronaut의 reflection-free 설계는 Native Image 빌드와 궁합이 좋습니다. 8~9편에서 만든 SSR 애플리케이션을 `./gradlew nativeCompile`로 빌드하면 JVM 대비 훨씬 짧은 시작 시간과 낮은 메모리 사용량을 가진 실행 파일이 생성됩니다. 실제 수치는 애플리케이션 규모와 구성에 따라 다르므로 직접 측정이 필요합니다.
+
+**Micronaut Serverless.** Lambda, Google Cloud Functions, Azure Functions 배포를 공식 지원합니다. AOT 덕분에 cold start가 짧아 서버리스에 특히 적합합니다. `micronaut-function-aws-api-proxy` 하나면 기존 컨트롤러를 Lambda 핸들러로 전환할 수 있습니다.
+
+**마이크로서비스 패턴.** Micronaut은 분산 추적(`micronaut-tracing-opentelemetry`), 서킷 브레이커(`micronaut-resilience4j`), 서비스 디스커버리(`micronaut-discovery-client`) 모듈을 제공합니다. 모놀리스에서 마이크로서비스로 확장할 때 Micronaut이 자연스러운 선택이 됩니다.
+
+**Micronaut Data.** 6편에서 JDBC를 다뤘지만, Micronaut Data의 JPA, R2DBC, MongoDB 지원은 별도로 깊게 다룰 만한 주제입니다. 특히 컴파일 타임에 JPQL/SQL을 검증하는 Micronaut Data의 접근 방식은 런타임 오류를 상당 부분 제거합니다.
+
+이 시리즈가 Micronaut을 처음 접하는 분들에게 실질적인 출발점이 되었으면 합니다. JVM 생태계에서 프레임워크 선택은 기술적 결정이기도 하지만, 팀의 배경과 서비스 운영 맥락을 함께 고려해야 합니다. Micronaut이 그 판단에 유효한 선택지 중 하나임을 이 시리즈를 통해 확인했기를 바랍니다.
+
+---
+
+**이전 편**: [Thymeleaf로 SSR 구현하기](/posts/2026-02-22-micronaut-8-views)
+
+**시리즈 처음으로**: [AOT의 시대를 열다 — Micronaut 소개와 역사적 맥락](/posts/2026-02-22-micronaut-1-intro)

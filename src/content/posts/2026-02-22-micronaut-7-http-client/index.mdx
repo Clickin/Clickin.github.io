@@ -1,0 +1,1147 @@
+---
+title: "선언적 HTTP Client와 Virtual Thread — @Client 인터페이스 완전 가이드"
+description: "Micronaut의 선언적 @Client 인터페이스로 외부 API를 호출하는 방법, Retry, Circuit Breaker, 인터셉터 패턴, 그리고 Virtual Thread 환경에서의 blocking client 활용을 설명합니다."
+date: 2026-02-22
+category: "dev"
+tags: ["Java", "Micronaut", "HttpClient", "DeclarativeClient", "VirtualThread", "Retry", "ServiceDiscovery"]
+series: "micronaut-guide"
+order: 7
+draft: false
+publish: true
+---
+
+6편에서 Micronaut Data JDBC로 데이터베이스 접근 계층을 구성했습니다. 실제 서비스에서는 자체 DB에 접근하는 것 외에도 **외부 API를 호출**하는 경우가 많습니다. 결제 게이트웨이, 물류 추적 API, 사내 다른 마이크로서비스 등 HTTP로 통신하는 의존 서비스들입니다.
+
+이 편에서는 Micronaut이 제공하는 두 가지 HTTP Client 방식을 모두 살펴보고, 특히 **선언적 `@Client` 인터페이스**를 중심으로 Retry, Circuit Breaker, 인터셉터, 타임아웃 설정, 서비스 디스커버리 연동까지 다룹니다. Virtual Thread 환경에서 blocking client를 그대로 사용하는 것이 왜 합리적인 선택인지도 함께 설명합니다.
+
+---
+
+## 의존성 설정
+
+HTTP Client 기능은 `micronaut-http-client` 모듈에 포함되어 있습니다.
+
+```kotlin
+dependencies {
+    // HTTP Client (선언적 @Client 포함)
+    implementation("io.micronaut:micronaut-http-client")
+
+    // Retry, Circuit Breaker 사용 시 (micronaut-retry)
+    implementation("io.micronaut.retry:micronaut-retry")
+
+    // 직렬화
+    implementation("io.micronaut.serde:micronaut-serde-jackson")
+
+    // Annotation Processor
+    annotationProcessor("io.micronaut.serde:micronaut-serde-processor")
+}
+```
+
+`micronaut-http-client`는 Micronaut 코어에 포함되어 있는 경우도 있지만, 명시적으로 선언하는 것이 좋습니다. `io.micronaut.application` 플러그인을 사용한다면 Micronaut의 BOM(Bill of Materials)이 버전을 관리하므로 버전을 별도 지정할 필요가 없습니다.
+
+---
+
+## 저수준 HttpClient vs 선언적 @Client
+
+Micronaut HTTP Client에는 두 가지 방식이 있습니다.
+
+**저수준 HttpClient (프로그래매틱)**는 직접 HTTP 요청을 조립하고 실행합니다.
+
+```java
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.client.HttpClient;
+import io.micronaut.http.client.annotation.Client;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+
+@Singleton
+public class LowLevelApiCaller {
+
+    // 필드 주입으로 HttpClient 인스턴스 획득
+    @Inject
+    @Client("https://api.example.com")
+    HttpClient httpClient;
+
+    public UserResponse getUser(Long userId) {
+        HttpRequest<?> request = HttpRequest.GET("/users/" + userId)
+            .header("Authorization", "Bearer " + getToken())
+            .header("Accept", "application/json");
+
+        // blocking 방식으로 실행
+        return httpClient.toBlocking()
+            .retrieve(request, UserResponse.class);
+    }
+
+    public void createUser(CreateUserRequest body) {
+        HttpRequest<CreateUserRequest> request = HttpRequest.POST("/users", body)
+            .contentType("application/json");
+
+        httpClient.toBlocking().exchange(request);
+    }
+}
+```
+
+**선언적 @Client**는 인터페이스만 정의하고 나머지는 Micronaut이 컴파일 타임에 구현체를 생성합니다.
+
+```java
+import io.micronaut.http.annotation.Get;
+import io.micronaut.http.annotation.PathVariable;
+import io.micronaut.http.client.annotation.Client;
+
+@Client("https://api.example.com")
+public interface UserApiClient {
+
+    @Get("/users/{id}")
+    UserResponse getUser(@PathVariable Long id);
+}
+```
+
+두 방식의 비교입니다.
+
+| 항목 | 저수준 HttpClient | 선언적 @Client |
+|------|-----------------|---------------|
+| 코드량 | 많다 — 요청 조립을 직접 | 적다 — 인터페이스 선언만 |
+| 유연성 | 높다 — 요청 세부 제어 가능 | 중간 — 어노테이션으로 표현 |
+| 동적 URL | 런타임에 URL 구성 가능 | URL 패턴이 어노테이션에 고정 |
+| 테스트 용이성 | mock 주입 필요 | 인터페이스 mock이 쉬움 |
+| 가독성 | 낮음 | 높음 |
+| Retry / Circuit Breaker | 수동 구현 또는 wrapping | 어노테이션으로 선언 |
+| 컴파일 타임 처리 | 없음 | 구현 클래스 자동 생성 |
+
+**언제 각각을 쓰는가:**
+
+저수준 HttpClient가 적합한 경우는 URL이 런타임에 결정되거나, 요청 헤더나 바디를 조건에 따라 동적으로 조립해야 하거나, 파일 업로드/스트리밍처럼 선언적 어노테이션으로 표현하기 어려운 시나리오입니다.
+
+선언적 `@Client`가 적합한 경우는 대부분의 일반적인 REST API 호출입니다. 엔드포인트 URL이 고정되어 있고, 요청/응답 스키마가 명확하며, 팀에서 코드를 보고 빠르게 파악해야 하는 경우에 특히 유리합니다.
+
+---
+
+## 선언적 클라이언트 기초
+
+외부 전자상거래 API를 호출하는 클라이언트를 예시로 선언적 클라이언트의 사용법을 단계별로 살펴봅니다.
+
+### 기본 인터페이스 정의
+
+```java
+package com.example.client;
+
+import io.micronaut.http.annotation.Client;
+
+@Client(id = "product-api",  // application.yml에 설정한 id로 URL을 별도 관리
+        path = "/v2")        // 기본 경로 prefix
+public interface ExternalProductClient {
+    // 메서드는 아래에서 추가
+}
+```
+
+`@Client`에 URL을 직접 쓰는 대신 `id`를 사용하면 URL을 `application.yml`에서 관리할 수 있습니다.
+
+```yaml
+# application.yml
+micronaut:
+  http:
+    services:
+      product-api:
+        url: https://api.external-shop.com
+        # 서비스별 타임아웃 설정
+        read-timeout: 10s
+        connect-timeout: 5s
+```
+
+이렇게 하면 환경별로 URL을 바꾸거나 (개발 환경에서는 mock 서버로), 설정 변경 없이 배포 환경에 맞게 조정할 수 있습니다.
+
+### GET, POST, PUT, DELETE 메서드
+
+```java
+package com.example.client;
+
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.MediaType;
+import io.micronaut.http.annotation.Body;
+import io.micronaut.http.annotation.Delete;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.http.annotation.Header;
+import io.micronaut.http.annotation.PathVariable;
+import io.micronaut.http.annotation.Post;
+import io.micronaut.http.annotation.Put;
+import io.micronaut.http.annotation.QueryValue;
+import io.micronaut.http.client.annotation.Client;
+
+import java.util.List;
+import java.util.Optional;
+
+@Client(id = "product-api", path = "/v2")
+public interface ExternalProductClient {
+
+    // 단순 GET — 응답 바디를 지정 타입으로 역직렬화
+    @Get("/products/{id}")
+    ExternalProduct getProduct(@PathVariable Long id);
+
+    // 존재하지 않을 수 있는 리소스 — Optional<T> 반환
+    @Get("/products/{id}")
+    Optional<ExternalProduct> findProduct(@PathVariable Long id);
+
+    // 쿼리 파라미터 — ?category=electronics&page=0&size=20
+    @Get("/products")
+    List<ExternalProduct> listProducts(
+        @QueryValue String category,
+        @QueryValue(defaultValue = "0") int page,
+        @QueryValue(defaultValue = "20") int size
+    );
+
+    // 응답 상태 코드도 필요할 때 — HttpResponse<T> 반환
+    @Get("/products/{id}")
+    HttpResponse<ExternalProduct> getProductWithStatus(@PathVariable Long id);
+
+    // 요청 헤더 추가 — @Header
+    @Get("/products/private/{id}")
+    ExternalProduct getPrivateProduct(
+        @PathVariable Long id,
+        @Header("X-Internal-Key") String internalKey
+    );
+
+    // POST — @Body로 요청 바디 바인딩
+    @Post(value = "/products", consumes = MediaType.APPLICATION_JSON)
+    HttpResponse<ExternalProduct> createProduct(@Body CreateProductRequest request);
+
+    // PUT — 리소스 전체 교체
+    @Put("/products/{id}")
+    ExternalProduct updateProduct(@PathVariable Long id, @Body UpdateProductRequest request);
+
+    // DELETE
+    @Delete("/products/{id}")
+    HttpResponse<Void> deleteProduct(@PathVariable Long id);
+}
+```
+
+```java
+package com.example.client;
+
+import io.micronaut.serde.annotation.Serdeable;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+@Serdeable
+public record ExternalProduct(
+    Long id,
+    String name,
+    String category,
+    BigDecimal price,
+    Integer stock,
+    LocalDateTime updatedAt
+) {}
+
+@Serdeable
+public record CreateProductRequest(
+    String name,
+    String category,
+    BigDecimal price,
+    Integer stock
+) {}
+
+@Serdeable
+public record UpdateProductRequest(
+    String name,
+    BigDecimal price,
+    Integer stock
+) {}
+```
+
+### 서비스에서 클라이언트 주입
+
+```java
+package com.example.service;
+
+import com.example.client.ExternalProductClient;
+import com.example.client.ExternalProduct;
+import jakarta.inject.Singleton;
+
+import java.util.List;
+
+@Singleton
+public class ProductSyncService {
+
+    private final ExternalProductClient productClient;
+
+    public ProductSyncService(ExternalProductClient productClient) {
+        this.productClient = productClient;
+    }
+
+    public List<ExternalProduct> fetchElectronics(int page) {
+        return productClient.listProducts("electronics", page, 50);
+    }
+
+    public ExternalProduct fetchAndVerify(Long productId) {
+        return productClient.findProduct(productId)
+            .orElseThrow(() -> new IllegalArgumentException(
+                "외부 API에서 상품을 찾을 수 없습니다: " + productId
+            ));
+    }
+}
+```
+
+선언적 클라이언트 인터페이스를 서비스에 주입하면 됩니다. Micronaut이 컴파일 타임에 생성한 구현 클래스가 자동으로 주입됩니다. Spring의 FeignClient[^feign]와 유사한 방식입니다.
+
+[^feign]: Spring Cloud OpenFeign은 인터페이스와 어노테이션만으로 HTTP 클라이언트를 선언하는 방식으로, Micronaut의 선언적 `@Client`와 설계 철학이 같습니다. 차이점은 Feign은 런타임 프록시 기반이고 Micronaut `@Client`는 컴파일 타임에 구현 클래스를 생성합니다.
+
+---
+
+## 반환 타입 전략
+
+선언적 클라이언트 메서드의 반환 타입에 따라 동작 방식이 달라집니다.
+
+### Blocking 반환 타입
+
+```java
+@Client("https://api.example.com")
+public interface OrderApiClient {
+
+    // T — 응답 바디를 역직렬화, 4xx/5xx는 HttpClientResponseException 던짐
+    Order getOrder(Long id);
+
+    // Optional<T> — 404 응답을 빈 Optional로 반환 (예외 없음)
+    Optional<Order> findOrder(Long id);
+
+    // HttpResponse<T> — 상태 코드, 헤더, 바디 모두 접근 가능
+    HttpResponse<Order> getOrderWithMeta(Long id);
+
+    // List<T> — JSON 배열 응답을 리스트로 역직렬화
+    List<Order> getOrdersByCustomer(Long customerId);
+}
+```
+
+### Reactive 반환 타입
+
+```java
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
+
+@Client("https://api.example.com")
+public interface ReactiveOrderApiClient {
+
+    // Publisher<T> — RxJava, Reactor 등 어떤 reactive 구현체도 가능
+    Publisher<Order> getOrderPublisher(Long id);
+
+    // Mono<T> — Project Reactor, 0 또는 1개의 결과
+    Mono<Order> getOrderMono(Long id);
+
+    // Flux<T> — 0개 이상의 결과 스트림
+    Flux<Order> getOrdersFlux(Long customerId);
+}
+```
+
+### Virtual Thread 환경에서 Blocking Client를 그대로 써도 되는 이유
+
+> **전제**: 이 섹션의 내용은 컨트롤러나 서비스가 `@ExecuteOn(TaskExecutors.BLOCKING)`으로 BLOCKING executor에서 실행되고 있을 때 적용됩니다. Micronaut Netty 서버에서 EventLoop thread에서 직접 blocking HTTP 클라이언트를 호출하면 해당 EventLoop가 담당하는 모든 커넥션이 멈춥니다. `@ExecuteOn`을 빠뜨리면 blocking client는 오히려 독이 됩니다.
+
+여기서 중요한 설계 결정을 다룹니다. Micronaut은 Netty EventLoop 기반이므로 reactive 방식이 "더 올바른" 방식처럼 느껴질 수 있습니다. 그러나 Virtual Thread 환경에서는 blocking client를 그대로 사용하는 것이 대부분의 경우 더 좋은 선택입니다.
+
+이유를 단계별로 살펴봅니다.
+
+**첫째, blocking HTTP 호출이 OS thread를 낭비하지 않습니다.** `@ExecuteOn(TaskExecutors.BLOCKING)`으로 컨트롤러나 서비스를 Virtual Thread에서 실행하면, HTTP 클라이언트의 `socket.read()` blocking call이 발생할 때 JVM이 해당 Virtual Thread를 park하고 carrier thread를 다른 Virtual Thread에 내어줍니다.
+
+```
+blocking HTTP 호출이 Virtual Thread에서 발생할 때:
+
+VThread-1: [요청 준비] → [TCP 전송] → park → [응답 수신] → [응답 처리]
+Carrier:   [=VT-1 실행=] → [=VT-2 실행=] → [=VT-3 실행=] → [=VT-1 재개=]
+                               ↑
+               HTTP 대기 중 다른 VT 처리
+```
+
+**둘째, 코드가 단순해집니다.** Mono/Flux 파이프라인은 중첩된 flatMap, error 처리, 타임아웃 설정 등이 복잡하게 엮입니다.
+
+```java
+// Reactive 방식 — 두 API를 병렬 호출하고 결합
+public Mono<EnrichedOrder> getEnrichedOrder(Long orderId) {
+    return reactiveOrderClient.getOrderMono(orderId)
+        .flatMap(order ->
+            Mono.zip(
+                reactiveUserClient.getUserMono(order.getCustomerId()),
+                reactiveProductClient.getProductMono(order.getProductId())
+            ).map(tuple -> new EnrichedOrder(
+                order,
+                tuple.getT1(),
+                tuple.getT2()
+            ))
+        )
+        .timeout(Duration.ofSeconds(5))
+        .onErrorResume(TimeoutException.class,
+            e -> Mono.error(new ServiceException("주문 조회 타임아웃")));
+}
+
+// Blocking 방식 — Virtual Thread에서 실행 (순차 호출, 가독성 우선)
+@ExecuteOn(TaskExecutors.BLOCKING)
+public EnrichedOrder getEnrichedOrder(Long orderId) {
+    Order order = orderClient.getOrder(orderId);
+    User user = userClient.getUser(order.getCustomerId());
+    Product product = productClient.getProduct(order.getProductId());
+    return new EnrichedOrder(order, user, product);
+}
+```
+
+두 번째 코드는 읽기 쉽습니다. 실행 흐름이 순차적이고, 변수 이름이 명확하며, 예외 처리가 일반적인 try-catch로 처리됩니다. 단, 세 API를 순차 호출하므로 단일 요청 내 응답 시간은 reactive 병렬 방식보다 길어집니다. 병렬성이 필요하다면 `CompletableFuture.allOf`나 구조적 동시성을 직접 조합해야 합니다.
+
+**셋째, 처리량 관점에서 Virtual Thread와 Reactive의 차이가 크지 않습니다.** 5편에서 설명한 것처럼, 웹 서비스의 요청 처리 시간 대부분은 I/O 대기입니다. Virtual Thread는 blocking 호출 시 carrier thread를 반납하므로, 처리량 측면에서 reactive와 유사한 결과를 얻습니다. Micronaut GitHub Discussion #11054에서도 Virtual Thread 환경에서는 blocking 방식의 단점이 사라지므로 reactive 타입을 강제할 이유가 없다고 언급됩니다.[^vt-blocking]
+
+[^vt-blocking]: Micronaut 코어 팀 토론 — [Threading model for HTTP Client and Java 21+](https://github.com/micronaut-projects/micronaut-core/discussions/11054)
+
+Spring 생태계와의 비교입니다.
+
+| 항목 | Spring RestTemplate | Spring WebClient | Micronaut @Client (blocking) |
+|------|-------------------|-----------------|------------------------------|
+| 반환 타입 | 동기 (`T`) | 비동기 (`Mono<T>`) | 동기 (`T`) |
+| VT 환경 적합성 | 적합 | 필요 없음 (복잡성만 증가) | 적합 |
+| 코드 복잡도 | 낮음 | 높음 | 낮음 |
+| 선언적 인터페이스 | 없음 (직접 호출) | 없음 (직접 빌더) | 있음 (@Client) |
+| FeignClient와 유사성 | 낮음 | 낮음 | 높음 |
+
+Micronaut의 선언적 blocking client + Virtual Thread 조합은 Spring의 FeignClient와 가장 유사한 경험을 제공하면서, Virtual Thread 덕분에 OS thread 낭비 없이 높은 동시성을 달성합니다.
+
+---
+
+## 에러 처리
+
+외부 API 호출은 예상치 못한 오류 응답을 반드시 처리해야 합니다.
+
+### HttpClientResponseException
+
+4xx, 5xx 응답은 기본적으로 `HttpClientResponseException`이 던져집니다.
+
+```java
+package com.example.service;
+
+import com.example.client.ExternalProductClient;
+import io.micronaut.http.HttpStatus;
+import io.micronaut.http.client.exceptions.HttpClientResponseException;
+import jakarta.inject.Singleton;
+
+@Singleton
+public class ExternalProductService {
+
+    private final ExternalProductClient productClient;
+
+    public ExternalProductService(ExternalProductClient productClient) {
+        this.productClient = productClient;
+    }
+
+    public ExternalProduct fetchProduct(Long productId) {
+        try {
+            return productClient.getProduct(productId);
+        } catch (HttpClientResponseException e) {
+            if (e.getStatus() == HttpStatus.NOT_FOUND) {
+                throw new ProductNotFoundException("외부 API에서 상품을 찾을 수 없습니다: " + productId);
+            }
+            if (e.getStatus() == HttpStatus.TOO_MANY_REQUESTS) {
+                throw new RateLimitException("외부 API 요청 한도 초과. 잠시 후 재시도하세요.");
+            }
+            // 서버 에러 (5xx)
+            throw new ExternalApiException(
+                "외부 API 오류: " + e.getStatus().getCode() + " " + e.getMessage()
+            );
+        }
+    }
+}
+```
+
+### 에러 응답 바디 파싱
+
+외부 API가 에러 응답 바디에 상세 정보를 담는 경우가 많습니다.
+
+```java
+import io.micronaut.http.client.exceptions.HttpClientResponseException;
+import io.micronaut.serde.annotation.Serdeable;
+
+@Serdeable
+public record ApiErrorResponse(
+    String code,
+    String message,
+    String details
+) {}
+
+// HttpClientResponseException에서 에러 응답 바디를 추출
+public ExternalProduct fetchProductSafely(Long productId) {
+    try {
+        return productClient.getProduct(productId);
+    } catch (HttpClientResponseException e) {
+        // 에러 응답 바디를 지정 타입으로 파싱
+        ApiErrorResponse error = e.getResponse()
+            .getBody(ApiErrorResponse.class)
+            .orElse(new ApiErrorResponse("UNKNOWN", "알 수 없는 오류", null));
+        throw new ExternalApiException("[" + error.code() + "] " + error.message());
+    }
+}
+```
+
+### @Error 핸들러로 전역 처리
+
+컨트롤러에서 발생하는 `HttpClientResponseException`을 전역으로 처리하려면 `@Error` 핸들러를 사용합니다.
+
+```java
+package com.example.controller;
+
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Error;
+import io.micronaut.http.client.exceptions.HttpClientResponseException;
+import io.micronaut.serde.annotation.Serdeable;
+
+@Controller
+public class GlobalErrorHandler {
+
+    @Serdeable
+    public record ErrorBody(int status, String message) {}
+
+    // global = true: 모든 컨트롤러에서 발생한 예외를 처리
+    @Error(exception = HttpClientResponseException.class, global = true)
+    public HttpResponse<ErrorBody> handleClientException(
+            HttpRequest<?> request, HttpClientResponseException e) {
+        int statusCode = e.getStatus().getCode();
+        return HttpResponse
+            .status(e.getStatus())
+            .body(new ErrorBody(statusCode, "외부 서비스 오류: " + e.getMessage()));
+    }
+
+    @Error(exception = ProductNotFoundException.class, global = true)
+    public HttpResponse<ErrorBody> handleNotFound(ProductNotFoundException e) {
+        return HttpResponse.notFound(new ErrorBody(404, e.getMessage()));
+    }
+
+    @Error(exception = ExternalApiException.class, global = true)
+    public HttpResponse<ErrorBody> handleExternalApiError(ExternalApiException e) {
+        return HttpResponse.serverError(new ErrorBody(502, e.getMessage()));
+    }
+}
+```
+
+---
+
+## Retry와 Circuit Breaker
+
+외부 API는 일시적인 오류가 발생할 수 있습니다. `micronaut-retry` 모듈로 재시도와 서킷 브레이커를 선언적으로 구성합니다.
+
+### @Retryable
+
+```java
+package com.example.service;
+
+import io.micronaut.retry.annotation.Retryable;
+import jakarta.inject.Singleton;
+
+@Singleton
+public class PaymentService {
+
+    private final PaymentApiClient paymentClient;
+
+    public PaymentService(PaymentApiClient paymentClient) {
+        this.paymentClient = paymentClient;
+    }
+
+    // 최대 3회 재시도, 첫 재시도 1초 후, 이후 배수로 증가 (지수 백오프)
+    @Retryable(
+        attempts = "3",
+        delay = "1s",
+        multiplier = "2.0",
+        includes = {HttpClientResponseException.class}
+    )
+    public PaymentResponse processPayment(PaymentRequest request) {
+        return paymentClient.processPayment(request);
+    }
+
+    // 특정 예외에서만 재시도하지 않음 (excludes)
+    @Retryable(
+        attempts = "3",
+        delay = "500ms",
+        excludes = {IllegalArgumentException.class}
+    )
+    public ShipmentStatus getShipmentStatus(String trackingNumber) {
+        return paymentClient.getShipmentStatus(trackingNumber);
+    }
+}
+```
+
+재시도 설정을 YAML로 외부화할 수도 있습니다. `@Retryable`의 각 속성에 `${}` 표현식으로 설정 값을 주입합니다.
+
+```yaml
+# application.yml
+payment:
+  retry:
+    attempts: 5
+    delay: 1s
+```
+
+```java
+// YAML 설정을 참조하는 방식
+@Retryable(
+    attempts = "${payment.retry.attempts:3}",
+    delay = "${payment.retry.delay:500ms}"
+)
+public PaymentResponse processPayment(PaymentRequest request) {
+    return paymentClient.processPayment(request);
+}
+```
+
+### @CircuitBreaker
+
+서킷 브레이커는 외부 서비스가 지속적으로 실패할 때 더 이상 시도하지 않고 빠르게 실패(fail-fast)합니다.
+
+```java
+package com.example.service;
+
+import io.micronaut.retry.annotation.CircuitBreaker;
+import jakarta.inject.Singleton;
+
+@Singleton
+public class InventoryService {
+
+    private final InventoryApiClient inventoryClient;
+
+    public InventoryService(InventoryApiClient inventoryClient) {
+        this.inventoryClient = inventoryClient;
+    }
+
+    // 5회 재시도 실패 시 서킷 오픈 (재시도 간 delay 2s) → reset 10s 후 half-open 시도
+    @CircuitBreaker(
+        attempts = "5",
+        delay = "2s",
+        reset = "10s"
+    )
+    public InventoryStatus checkInventory(Long productId) {
+        return inventoryClient.getInventory(productId);
+    }
+}
+```
+
+서킷 브레이커의 상태 전환 흐름입니다.
+
+```
+서킷 브레이커 상태 전환:
+
+[CLOSED — 정상]
+     │
+     │ 연속 실패가 attempts 횟수에 도달
+     ↓
+[OPEN — 차단]
+     │
+     │ reset 시간 경과
+     ↓
+[HALF-OPEN — 탐침]
+     │                 │
+     │ 성공            │ 실패
+     ↓                 ↓
+[CLOSED 복귀]      [OPEN 유지]
+```
+
+`@CircuitBreaker`는 `@Retryable`의 변형으로, `attempts`만큼 재시도한 뒤 서킷을 여는 동작이 이미 포함되어 있습니다. 같은 메서드에 `@Retryable`을 추가로 붙이는 것은 불필요하며 동작이 중첩되어 예측하기 어렵습니다. 재시도 + 서킷 브레이커 동작이 필요하다면 `@CircuitBreaker`만으로 충분합니다.
+
+서킷이 열렸을 때 fallback 동작이 필요하다면, `@Recoverable` 어노테이션과 `@Fallback` 구현체를 조합합니다.[^fallback] `@CircuitBreaker` 어노테이션 자체에는 fallback 속성이 없습니다.
+
+[^fallback]: Micronaut 공식 문서 — [Retry and Recovery](https://docs.micronaut.io/latest/guide/#retry)
+
+---
+
+## Request/Response 인터셉터 (HttpClientFilter)
+
+모든 외부 API 요청에 공통으로 처리해야 하는 것들이 있습니다. 인증 헤더 추가, 요청/응답 로깅, 상관 ID(correlation ID) 전파 등입니다. `HttpClientFilter`를 사용하면 개별 클라이언트 인터페이스를 수정하지 않고 이를 처리할 수 있습니다.
+
+### Bearer 토큰 자동 주입
+
+```java
+package com.example.filter;
+
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.MutableHttpRequest;
+import io.micronaut.http.annotation.Filter;
+import io.micronaut.http.filter.ClientFilterChain;
+import io.micronaut.http.filter.HttpClientFilter;
+import org.reactivestreams.Publisher;
+
+// 이 필터가 적용될 URL 패턴 — /v2/로 시작하는 모든 요청에 적용
+@Filter("/v2/**")
+public class BearerTokenFilter implements HttpClientFilter {
+
+    private final TokenProvider tokenProvider;
+
+    public BearerTokenFilter(TokenProvider tokenProvider) {
+        this.tokenProvider = tokenProvider;
+    }
+
+    @Override
+    public Publisher<? extends io.micronaut.http.HttpResponse<?>> doFilter(
+            MutableHttpRequest<?> request, ClientFilterChain chain) {
+
+        // 현재 유효한 토큰을 가져와서 Authorization 헤더에 추가
+        String token = tokenProvider.getValidToken();
+        MutableHttpRequest<?> authedRequest = request
+            .header("Authorization", "Bearer " + token);
+
+        return chain.proceed(authedRequest);
+    }
+}
+```
+
+```java
+package com.example.filter;
+
+import jakarta.inject.Singleton;
+
+@Singleton
+public class TokenProvider {
+
+    private volatile String cachedToken;
+    private volatile long tokenExpiresAt;
+
+    // 토큰이 만료되었거나 없으면 갱신
+    public String getValidToken() {
+        if (cachedToken == null || System.currentTimeMillis() > tokenExpiresAt) {
+            refreshToken();
+        }
+        return cachedToken;
+    }
+
+    private synchronized void refreshToken() {
+        // 이미 다른 스레드가 갱신했는지 재확인
+        if (cachedToken != null && System.currentTimeMillis() <= tokenExpiresAt) {
+            return;
+        }
+        // 실제로는 OAuth2 토큰 엔드포인트 호출 등
+        this.cachedToken = fetchNewTokenFromAuthServer();
+        this.tokenExpiresAt = System.currentTimeMillis() + (3600 * 1000); // 1시간
+    }
+
+    private String fetchNewTokenFromAuthServer() {
+        // 인증 서버에서 토큰 획득 로직
+        return "eyJhbGciOiJSUzI1NiJ9...";
+    }
+}
+```
+
+### 요청/응답 로깅 필터
+
+```java
+package com.example.filter;
+
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.MutableHttpRequest;
+import io.micronaut.http.annotation.Filter;
+import io.micronaut.http.filter.ClientFilterChain;
+import io.micronaut.http.filter.HttpClientFilter;
+import org.reactivestreams.Publisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
+
+import java.time.Instant;
+
+@Filter("/**")
+public class LoggingClientFilter implements HttpClientFilter {
+
+    private static final Logger log = LoggerFactory.getLogger(LoggingClientFilter.class);
+
+    @Override
+    public Publisher<? extends HttpResponse<?>> doFilter(
+            MutableHttpRequest<?> request, ClientFilterChain chain) {
+
+        long startMs = System.currentTimeMillis();
+        String method = request.getMethod().name();
+        String uri = request.getUri().toString();
+
+        log.debug("[HTTP Client] {} {} 요청 시작", method, uri);
+
+        return Flux.from(chain.proceed(request))
+            .doOnNext(response -> {
+                long elapsed = System.currentTimeMillis() - startMs;
+                log.debug("[HTTP Client] {} {} → {} ({}ms)",
+                    method, uri, response.getStatus().getCode(), elapsed);
+            })
+            .doOnError(e -> {
+                long elapsed = System.currentTimeMillis() - startMs;
+                log.warn("[HTTP Client] {} {} → 오류: {} ({}ms)",
+                    method, uri, e.getMessage(), elapsed);
+            });
+    }
+}
+```
+
+### Correlation ID 전파
+
+마이크로서비스 환경에서 요청 추적을 위해 `X-Correlation-ID` 헤더를 전파합니다.
+
+```java
+package com.example.filter;
+
+import io.micronaut.http.MutableHttpRequest;
+import io.micronaut.http.annotation.Filter;
+import io.micronaut.http.filter.ClientFilterChain;
+import io.micronaut.http.filter.HttpClientFilter;
+import org.reactivestreams.Publisher;
+
+import java.util.UUID;
+
+@Filter("/**")
+public class CorrelationIdFilter implements HttpClientFilter {
+
+    // ThreadLocal에서 현재 요청의 correlation ID를 가져옴
+    // (서버 측 필터에서 설정했다고 가정)
+    private final CorrelationIdHolder correlationIdHolder;
+
+    public CorrelationIdFilter(CorrelationIdHolder correlationIdHolder) {
+        this.correlationIdHolder = correlationIdHolder;
+    }
+
+    @Override
+    public Publisher<? extends io.micronaut.http.HttpResponse<?>> doFilter(
+            MutableHttpRequest<?> request, ClientFilterChain chain) {
+
+        String correlationId = correlationIdHolder.get();
+        if (correlationId == null) {
+            correlationId = UUID.randomUUID().toString();
+        }
+
+        return chain.proceed(request.header("X-Correlation-ID", correlationId));
+    }
+}
+```
+
+`@Filter`의 URL 패턴은 특정 클라이언트에만 적용하도록 좁힐 수 있습니다. 예를 들어 `@Filter("/v2/payments/**")`는 결제 API 경로에만 적용되는 필터입니다.
+
+---
+
+## 타임아웃과 커넥션 풀 설정
+
+외부 API 호출의 타임아웃과 커넥션 관리는 `application.yml`에서 서비스별로 세밀하게 설정합니다.
+
+```yaml
+micronaut:
+  http:
+    # 전역 기본값
+    client:
+      read-timeout: 10s
+      connect-timeout: 5s
+      # 최대 커넥션 수 (Netty 채널 풀)
+      max-content-length: 10485760  # 10MB
+
+    # 서비스별 개별 설정
+    services:
+      # 결제 API — 응답이 느릴 수 있으므로 타임아웃을 길게
+      payment-api:
+        url: https://api.payment-gateway.com
+        read-timeout: 30s
+        connect-timeout: 10s
+
+      # 재고 API — 빠른 응답을 기대, 짧은 타임아웃
+      inventory-api:
+        url: https://api.inventory.internal
+        read-timeout: 3s
+        connect-timeout: 2s
+
+      # 사용자 API — 사내 서비스
+      user-api:
+        url: https://api.users.internal
+        read-timeout: 5s
+        connect-timeout: 3s
+        # HTTP/2 활성화
+        http-version: HTTP_2_0
+```
+
+코드 레벨에서 타임아웃을 지정해야 하는 경우는 `@Client` 어노테이션의 `configuration` 속성을 활용합니다.
+
+```java
+import io.micronaut.http.client.HttpClientConfiguration;
+import io.micronaut.http.client.annotation.Client;
+
+// 이 클라이언트만의 타임아웃 설정
+@Client(
+    value = "https://api.slow-service.com",
+    configuration = SlowServiceClientConfig.class
+)
+public interface SlowServiceClient {
+    @Get("/data")
+    HeavyData fetchData();
+}
+```
+
+```java
+package com.example.config;
+
+import io.micronaut.context.annotation.ConfigurationProperties;
+import io.micronaut.http.client.DefaultHttpClientConfiguration;
+
+import java.time.Duration;
+
+@ConfigurationProperties("slow-service.http.client")
+public class SlowServiceClientConfig extends DefaultHttpClientConfiguration {
+
+    public SlowServiceClientConfig() {
+        setReadTimeout(Duration.ofSeconds(60));
+        setConnectTimeout(Duration.ofSeconds(10));
+    }
+}
+```
+
+---
+
+## 서비스 디스커버리 연동
+
+마이크로서비스 환경에서는 서비스의 IP와 포트가 동적으로 바뀝니다. Micronaut은 Consul, Eureka, Kubernetes DNS를 통한 서비스 디스커버리를 지원합니다.
+
+### @Client에서 서비스 ID 사용
+
+```java
+// URL을 직접 지정하는 대신 서비스 ID를 사용
+@Client("inventory-service")  // Consul에 등록된 'inventory-service'의 주소를 자동 해석
+public interface InventoryServiceClient {
+
+    @Get("/api/inventory/{productId}")
+    InventoryStatus getInventory(@PathVariable Long productId);
+}
+```
+
+### Consul 연동
+
+```yaml
+# application.yml
+micronaut:
+  application:
+    name: order-service
+
+consul:
+  client:
+    registration:
+      enabled: true
+    defaultZone: ${CONSUL_HOST:localhost}:${CONSUL_PORT:8500}
+```
+
+```kotlin
+// build.gradle.kts — Consul 의존성 추가
+implementation("io.micronaut.discovery:micronaut-discovery-client")
+```
+
+Consul이 활성화되면 `$inventory-service`는 Consul에서 `inventory-service`라는 이름으로 등록된 서비스의 현재 주소로 자동 해석됩니다. 서비스가 여러 인스턴스로 실행 중이라면 클라이언트 사이드 로드 밸런싱(라운드로빈)이 자동 적용됩니다.
+
+### Kubernetes 환경
+
+Kubernetes 환경에서는 서비스 디스커버리를 별도로 설정하지 않아도 됩니다. Kubernetes의 Service DNS가 `inventory-service.namespace.svc.cluster.local` 형식으로 해석해주므로, 환경변수로 URL을 주입하는 방식이 더 단순합니다.
+
+```yaml
+micronaut:
+  http:
+    services:
+      inventory-api:
+        url: ${INVENTORY_SERVICE_URL:http://inventory-service:8080}
+```
+
+---
+
+## 테스트
+
+외부 API를 호출하는 코드는 실제 API 없이 테스트할 수 있어야 합니다.
+
+### WireMock으로 외부 API 모킹
+
+```kotlin
+// build.gradle.kts
+testImplementation("org.wiremock:wiremock-standalone:3.10.0")
+```
+
+```java
+package com.example.service;
+
+import com.example.client.ExternalProductClient;
+import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import io.micronaut.context.ApplicationContext;
+import io.micronaut.runtime.server.EmbeddedServer;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+
+import java.util.Map;
+
+import static com.github.tomakehurst.wiremock.client.WireMock.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class ExternalProductServiceTest {
+
+    WireMockServer wireMock;
+    ApplicationContext context;
+    ExternalProductService service;
+
+    @BeforeAll
+    void setUp() {
+        // WireMock 서버 시작
+        wireMock = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+        wireMock.start();
+
+        // Micronaut 컨텍스트를 WireMock 포트로 시작
+        context = ApplicationContext.run(Map.of(
+            "micronaut.http.services.product-api.url",
+            "http://localhost:" + wireMock.port()
+        ));
+
+        service = context.getBean(ExternalProductService.class);
+    }
+
+    @AfterAll
+    void tearDown() {
+        wireMock.stop();
+        context.close();
+    }
+
+    @Test
+    @DisplayName("상품 조회 성공 시 ExternalProduct를 반환한다")
+    void fetchProduct_onSuccess_returnsProduct() {
+        // given
+        wireMock.stubFor(get(urlPathEqualTo("/v2/products/1"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("""
+                    {
+                      "id": 1,
+                      "name": "테스트 상품",
+                      "category": "electronics",
+                      "price": 99000.00,
+                      "stock": 50
+                    }
+                    """)));
+
+        // when
+        ExternalProduct product = service.fetchProduct(1L);
+
+        // then
+        assertNotNull(product);
+        assertEquals(1L, product.id());
+        assertEquals("테스트 상품", product.name());
+        assertEquals("electronics", product.category());
+    }
+
+    @Test
+    @DisplayName("외부 API가 404를 반환하면 ProductNotFoundException이 발생한다")
+    void fetchProduct_on404_throwsProductNotFoundException() {
+        // given
+        wireMock.stubFor(get(urlPathEqualTo("/v2/products/999"))
+            .willReturn(aResponse()
+                .withStatus(404)
+                .withHeader("Content-Type", "application/json")
+                .withBody("""
+                    {"code": "NOT_FOUND", "message": "Product not found"}
+                    """)));
+
+        // when & then
+        assertThrows(ProductNotFoundException.class,
+            () -> service.fetchProduct(999L));
+    }
+
+    @Test
+    @DisplayName("외부 API가 5xx를 반환하면 ExternalApiException이 발생한다")
+    void fetchProduct_on500_throwsExternalApiException() {
+        // given
+        wireMock.stubFor(get(urlPathEqualTo("/v2/products/500"))
+            .willReturn(aResponse()
+                .withStatus(500)
+                .withBody("Internal Server Error")));
+
+        // when & then
+        assertThrows(ExternalApiException.class,
+            () -> service.fetchProduct(500L));
+    }
+}
+```
+
+### @MockBean으로 단위 테스트
+
+통합 컨텍스트 없이 클라이언트 인터페이스를 mock으로 대체하는 방법입니다.
+
+```java
+package com.example.service;
+
+import io.micronaut.test.annotation.MockBean;
+import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+@MicronautTest
+class ProductSyncServiceTest {
+
+    @Inject
+    ProductSyncService syncService;
+
+    @Inject
+    ExternalProductClient mockProductClient;
+
+    // @MockBean: Micronaut 컨텍스트에서 실제 Bean 대신 이 mock을 주입
+    @MockBean(ExternalProductClient.class)
+    ExternalProductClient mockExternalProductClient() {
+        return mock(ExternalProductClient.class);
+    }
+
+    @Test
+    @DisplayName("외부 API에서 전자제품 목록을 가져온다")
+    void fetchElectronics_returnsProductList() {
+        // given
+        List<ExternalProduct> fakeProducts = List.of(
+            new ExternalProduct(1L, "노트북", "electronics",
+                BigDecimal.valueOf(1500000), 5, null),
+            new ExternalProduct(2L, "스마트폰", "electronics",
+                BigDecimal.valueOf(900000), 15, null)
+        );
+        when(mockProductClient.listProducts(anyString(), anyInt(), anyInt()))
+            .thenReturn(fakeProducts);
+
+        // when
+        List<ExternalProduct> result = syncService.fetchElectronics(0);
+
+        // then
+        assertEquals(2, result.size());
+        assertEquals("노트북", result.get(0).name());
+    }
+}
+```
+
+`@MockBean`은 Micronaut 컨텍스트 내의 실제 Bean을 Mockito mock으로 교체합니다. `ExternalProductClient`의 실제 구현(HTTP를 실제로 호출하는 컴파일 타임 생성 클래스) 대신 mock이 주입되어, 외부 네트워크 없이 서비스 로직만 테스트할 수 있습니다.
+
+---
+
+## 정리
+
+이 편에서 다룬 내용을 정리합니다.
+
+| 주제 | 핵심 포인트 |
+|------|------------|
+| 두 가지 방식 | 저수준 HttpClient (유연, 코드량 많음) vs 선언적 @Client (간결, 어노테이션 기반) |
+| 선언적 클라이언트 | `@Client` 인터페이스 + `@Get`/`@Post` 등으로 외부 API 계약을 코드로 표현 |
+| URL 외부화 | `@Client(id = "...")` + `micronaut.http.services` 설정으로 환경별 관리 |
+| Blocking + VT | Virtual Thread에서 blocking client는 OS thread 낭비 없이 고동시성 달성 |
+| 코드 단순성 | Reactive 파이프라인 없이 순차적 코드로 처리량 확보; 단, 단일 요청 내 병렬 호출이 필요하면 별도 조합 필요 |
+| 에러 처리 | `HttpClientResponseException` 처리, `@Error` 전역 핸들러 |
+| Retry | `@Retryable(attempts, delay, multiplier)` — 지수 백오프 재시도 |
+| Circuit Breaker | `@CircuitBreaker(attempts, delay, reset)` — 반복 실패 시 빠른 실패 |
+| HttpClientFilter | 인증 헤더, 로깅, Correlation ID를 클라이언트 코드 수정 없이 적용 |
+| 서비스 디스커버리 | `@Client("service-id")`로 Consul/Kubernetes 동적 주소 해석 |
+| 테스트 | WireMock으로 외부 API 모킹, `@MockBean`으로 단위 테스트 |
+
+다음 편에서는 **Thymeleaf로 SSR(서버 사이드 렌더링)을 구현**합니다. Micronaut Views 모듈로 Thymeleaf 템플릿을 렌더링하고, 정적 자산 서빙, 레이아웃 구성, 그리고 API 서버와 SSR 서버를 함께 운영하는 패턴을 살펴봅니다.
+
+---
+
+**이전 편**: [Micronaut Data JDBC와 Virtual Thread](/posts/2026-02-22-micronaut-6-data-jdbc)
+
+**다음 편**: [Thymeleaf로 SSR 구현하기](/posts/2026-02-22-micronaut-8-views)

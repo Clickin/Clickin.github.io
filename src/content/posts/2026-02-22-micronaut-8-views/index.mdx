@@ -1,0 +1,1173 @@
+---
+title: "Thymeleaf로 SSR 구현하기 — Micronaut Views 실전 가이드"
+description: "micronaut-views-thymeleaf로 서버사이드 렌더링 애플리케이션을 구현합니다. 템플릿 레이아웃, 폼 처리, Bean Validation, i18n까지 실전 예제로 다룹니다."
+date: 2026-02-22
+category: "dev"
+tags: ["Java", "Micronaut", "Thymeleaf", "SSR", "Views", "Template", "MVC"]
+series: "micronaut-guide"
+order: 8
+draft: false
+publish: true
+---
+
+5편까지 Micronaut의 HTTP 서버 모델과 Virtual Thread를 살펴봤습니다. 6편과 7편에서는 데이터 접근과 선언적 HTTP Client를 다뤘습니다. 이번 편에서는 방향을 바꾸어 **서버사이드 렌더링(SSR)** 을 구현합니다. REST API가 아닌, 브라우저가 직접 사용하는 HTML을 서버에서 생성하는 방식입니다.
+
+이 편에서는 Micronaut Views 모듈로 Thymeleaf 템플릿 엔진을 연동하고, 상품 관리 예제를 통해 레이아웃 구성부터 폼 처리까지 정리합니다.
+
+---
+
+## Micronaut Views 모듈 소개
+
+### 지원 템플릿 엔진 비교
+
+Micronaut Views 모듈(`micronaut-views-*`)은 여러 템플릿 엔진을 지원합니다. 각 엔진의 특성과 사용 상황을 비교합니다.
+
+| 엔진 | 아티팩트 | HTML5 네이티브 | 로직 분리 | 성숙도 | 추천 상황 |
+|------|---------|--------------|---------|------|---------|
+| Thymeleaf | `micronaut-views-thymeleaf` | 예 (Natural Templates) | 보통 | 매우 높음 | Spring 출신 팀, 복잡한 레이아웃 |
+| Mustache | `micronaut-views-mustache` | 아니오 | 강함 (Logic-less) | 높음 | 단순 렌더링, 다국어 팀 |
+| Velocity | `micronaut-views-velocity` | 아니오 | 낮음 | 낮음 (레거시) | 레거시 마이그레이션 |
+| Freemarker | `micronaut-views-freemarker` | 아니오 | 보통 | 높음 | 이메일 템플릿, 코드 생성 |
+| JTE | `micronaut-views-jte` | 예 | 보통 | 중간 | 타입 안전 템플릿, 성능 우선 |
+| Rocker | `micronaut-views-rocker` | 예 | 보통 | 낮음 | Akka/Play 출신 팀 |
+
+### 왜 Thymeleaf를 선택하는가
+
+이 편에서 Thymeleaf를 선택한 이유는 세 가지입니다.
+
+**첫째, Spring 생태계 친숙도.** Spring MVC + Thymeleaf 조합은 국내 Java 웹 프로젝트에서 JSP 이후 대안으로 널리 쓰여 왔습니다. Spring Boot를 써왔다면 Thymeleaf의 `th:*` 속성과 폼 바인딩이 이미 익숙합니다. Micronaut으로 넘어와도 템플릿 문법을 새로 배울 필요가 없습니다.
+
+**둘째, Natural Templates.** Thymeleaf의 핵심 설계 원칙 중 하나는 브라우저에서 HTML 파일을 직접 열었을 때도 구조를 확인할 수 있는 것입니다. `th:text="${product.name}"` 속성은 템플릿 엔진이 없는 환경에서 무시되고, 태그 안의 기본값이 그대로 보입니다. 디자이너와 협업하거나 Figma에서 내보낸 HTML을 템플릿으로 전환할 때 유리합니다.
+
+**셋째, 성숙한 레이아웃 시스템.** `th:replace`, `th:insert`, `th:fragment`를 사용한 컴포넌트 조합이 직관적이고, 서드파티 `thymeleaf-layout-dialect` 없이도 충분한 레이아웃 구조를 만들 수 있습니다.
+
+JTE는 컴파일 타임 타입 체크와 성능 면에서 고려할 만한 대안입니다. 다만 문법이 다르기 때문에 Spring 출신 팀이라면 Thymeleaf 쪽이 전환 비용이 낮습니다.
+
+---
+
+## 의존성 설정
+
+### build.gradle.kts (Kotlin DSL)
+
+Micronaut 4.x 기준으로 Thymeleaf Views를 활성화하는 설정입니다.
+
+```kotlin
+plugins {
+    id("io.micronaut.application") version "4.4.2"
+}
+
+group = "com.example"
+version = "0.1"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Micronaut 핵심
+    annotationProcessor("io.micronaut:micronaut-http-validation")
+    annotationProcessor("io.micronaut.validation:micronaut-validation-processor")
+    implementation("io.micronaut:micronaut-http-server-netty")
+    implementation("io.micronaut:micronaut-jackson-databind")
+
+    // Views — Thymeleaf
+    implementation("io.micronaut.views:micronaut-views-thymeleaf")
+
+    // Bean Validation (폼 검증)
+    implementation("io.micronaut.validation:micronaut-validation")
+    annotationProcessor("io.micronaut.validation:micronaut-validation-processor")
+
+    // 편의
+    compileOnly("org.projectlombok:lombok")
+    annotationProcessor("org.projectlombok:lombok")
+
+    // 런타임
+    runtimeOnly("ch.qos.logback:logback-classic")
+}
+
+java {
+    sourceCompatibility = JavaVersion.toVersion("21")
+    targetCompatibility = JavaVersion.toVersion("21")
+}
+
+micronaut {
+    runtime("netty")
+    testRuntime("junit5")
+    processing {
+        incremental(true)
+        annotations("com.example.*")
+    }
+}
+```
+
+`micronaut-views-thymeleaf`를 추가하면 Thymeleaf가 classpath에 올라오고, Micronaut이 자동으로 `ThymeleafViewsRenderer`를 등록합니다. 별도 Bean 선언 없이 `application.yml`에서 설정만 하면 됩니다.
+
+### application.yml
+
+```yaml
+micronaut:
+  application:
+    name: product-store
+  views:
+    folder: views  # 기본값: views. 변경 시 micronaut.views.folder 사용
+    thymeleaf:
+      enabled: true
+      suffix: ".html"
+      cacheable: true        # 프로덕션: true, 개발 시 false로 설정
+      cache-ttl: 1h          # Duration 형식 (1h, 30m, 3600s 등)
+      check-existence: true
+```
+
+템플릿 경로는 `micronaut.views.folder`로 변경합니다. 기본값은 `views`이며, `src/main/resources/views/`에서 템플릿을 찾습니다. `prefix`는 Micronaut Views Thymeleaf의 지원 설정이 아닙니다.[^views-config] 개발 중에는 `cacheable: false`로 설정해 템플릿 변경을 즉시 반영받을 수 있습니다.
+
+[^views-config]: Micronaut Views 공식 설정 레퍼런스: https://micronaut-projects.github.io/micronaut-views/latest/guide/configurationreference.html — `micronaut.views.thymeleaf`에는 `prefix` 속성이 없으며, 공용 경로는 `micronaut.views.folder`로 설정한다.
+
+---
+
+## 템플릿 디렉토리 구조
+
+### 권장 디렉토리 구성
+
+관심사 분리와 재사용성을 고려한 디렉토리 구조입니다.
+
+```
+src/main/resources/
+└── views/
+    ├── layout/
+    │   ├── base.html          # 공통 HTML 뼈대 (head, header, footer 포함)
+    │   ├── header.html        # fragment: 상단 네비게이션
+    │   └── footer.html        # fragment: 하단 푸터
+    ├── product/
+    │   ├── list.html          # 상품 목록
+    │   ├── detail.html        # 상품 상세
+    │   ├── form.html          # 상품 등록/수정 폼
+    │   └── form-result.html   # 처리 결과 페이지
+    ├── auth/
+    │   └── login.html         # 로그인 폼 (9편에서 활용)
+    └── error/
+        ├── 404.html
+        └── 500.html
+```
+
+Thymeleaf는 `prefix + view name + suffix`로 템플릿 경로를 결정합니다. `@View("product/list")`를 반환하면 `views/product/list.html`을 렌더링합니다. 경로 구분자는 슬래시(`/`)입니다.
+
+---
+
+## Controller에서 View 반환
+
+Micronaut에서 뷰를 반환하는 방법은 두 가지입니다.
+
+### 방법 1: ModelAndView 반환
+
+`io.micronaut.views.ModelAndView`를 직접 반환합니다. 뷰 이름과 모델을 명시적으로 구성합니다.
+
+```java
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.views.ModelAndView;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Controller("/products")
+public class ProductController {
+
+    private final ProductService productService;
+
+    public ProductController(ProductService productService) {
+        this.productService = productService;
+    }
+
+    @Get
+    public ModelAndView<Map<String, Object>> list() {
+        Map<String, Object> model = new HashMap<>();
+        model.put("products", productService.findAll());
+        model.put("pageTitle", "상품 목록");
+        return new ModelAndView<>("product/list", model);
+    }
+}
+```
+
+### 방법 2: @View 어노테이션
+
+`@View` 어노테이션으로 뷰 이름을 고정하고, 메서드 반환값을 모델로 사용합니다. `Map<String, Object>` 또는 임의의 객체를 반환할 수 있습니다.
+
+```java
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.views.View;
+
+import java.util.Map;
+
+@Controller("/products")
+public class ProductController {
+
+    private final ProductService productService;
+
+    public ProductController(ProductService productService) {
+        this.productService = productService;
+    }
+
+    @View("product/list")
+    @Get
+    public Map<String, Object> list() {
+        return Map.of(
+            "products", productService.findAll(),
+            "pageTitle", "상품 목록"
+        );
+    }
+
+    @View("product/detail")
+    @Get("/{id}")
+    public Map<String, Object> detail(Long id) {
+        Product product = productService.findById(id)
+            .orElseThrow(() -> new ProductNotFoundException(id));
+        return Map.of("product", product);
+    }
+}
+```
+
+`@View` 방식이 더 간결합니다. 반환하는 `Map`의 키가 템플릿 변수 이름이 됩니다. `@View` 어노테이션에 뷰 이름을 하드코딩하므로, 조건에 따라 다른 뷰를 반환해야 할 때는 `ModelAndView`를 사용해야 합니다.
+
+### 모델 객체 설계
+
+`Map<String, Object>` 대신 전용 모델 클래스를 만들면 타입 안전성이 높아집니다.
+
+```java
+// 상품 목록 페이지 전용 모델
+public record ProductListModel(
+    List<ProductDto> products,
+    String pageTitle,
+    String searchQuery,
+    int totalCount
+) {}
+
+// 컨트롤러
+@View("product/list")
+@Get
+public ProductListModel list(@QueryValue(defaultValue = "") String q) {
+    List<ProductDto> products = productService.search(q);
+    return new ProductListModel(products, "상품 목록", q, products.size());
+}
+```
+
+Thymeleaf 템플릿에서는 `${products}`, `${pageTitle}` 처럼 필드 이름으로 바로 접근합니다.
+
+---
+
+## Thymeleaf 기초 연동
+
+### 핵심 th:* 속성
+
+실제 상품 목록 템플릿(`views/product/list.html`)을 구성하면서 주요 Thymeleaf 속성을 살펴봅니다.
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title th:text="${pageTitle} + ' — Product Store'">상품 목록 — Product Store</title>
+    <link rel="stylesheet" th:href="@{/static/css/main.css}" href="/static/css/main.css">
+</head>
+<body>
+
+<header>
+    <nav>
+        <a th:href="@{/products}">상품 목록</a>
+        <a th:href="@{/products/new}">상품 등록</a>
+    </nav>
+    <p th:if="${param.saved}" class="flash-success">상품이 등록되었습니다.</p>
+    <p th:if="${param.deleted}" class="flash-info">상품이 삭제되었습니다.</p>
+</header>
+
+<main>
+    <h1 th:text="${pageTitle}">상품 목록</h1>
+
+    <!-- 검색 폼 -->
+    <form th:action="@{/products}" method="get">
+        <input type="text" name="q"
+               th:value="${searchQuery}"
+               placeholder="상품명 검색">
+        <button type="submit">검색</button>
+    </form>
+
+    <!-- 결과 없음 -->
+    <p th:if="${#lists.isEmpty(products)}" class="empty-state">
+        등록된 상품이 없습니다.
+    </p>
+
+    <!-- 상품 목록 테이블 -->
+    <table th:unless="${#lists.isEmpty(products)}">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>상품명</th>
+                <th>가격</th>
+                <th>재고</th>
+                <th>작업</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr th:each="product : ${products}">
+                <td th:text="${product.id}">1</td>
+                <td>
+                    <a th:href="@{/products/{id}(id=${product.id})}"
+                       th:text="${product.name}">
+                        상품명
+                    </a>
+                </td>
+                <td th:text="${#numbers.formatDecimal(product.price, 0, 'COMMA', 0, 'POINT')} + '원'">
+                    10,000원
+                </td>
+                <td th:text="${product.stock}">100</td>
+                <td>
+                    <a th:href="@{/products/{id}/edit(id=${product.id})}">수정</a>
+                    <form th:action="@{/products/{id}/delete(id=${product.id})}"
+                          method="post"
+                          style="display:inline"
+                          onsubmit="return confirm('삭제하시겠습니까?')">
+                        <button type="submit">삭제</button>
+                    </form>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p th:if="${totalCount > 0}"
+       th:text="'총 ' + ${totalCount} + '개의 상품'">
+        총 0개의 상품
+    </p>
+</main>
+
+</body>
+</html>
+```
+
+주요 속성을 정리합니다.
+
+| 속성 | 역할 | 예시 |
+|------|------|------|
+| `th:text` | 태그 텍스트 내용 치환 | `th:text="${product.name}"` |
+| `th:each` | 컬렉션 반복 | `th:each="item : ${items}"` |
+| `th:if` | 조건부 렌더링 (false이면 태그 제거) | `th:if="${list.isEmpty()}"` |
+| `th:unless` | th:if의 반대 | `th:unless="${list.isEmpty()}"` |
+| `th:href` | 링크 URL 생성 | `th:href="@{/products/{id}(id=${id})}"` |
+| `th:action` | 폼 action URL | `th:action="@{/products}"` |
+| `th:value` | input의 value | `th:value="${searchQuery}"` |
+| `th:object` | 폼 바인딩 객체 지정 | `th:object="${productForm}"` |
+| `th:field` | 폼 필드 바인딩 | `th:field="*{name}"` |
+| `th:attr` | 임의 HTML 속성 설정 | `th:attr="data-id=${id}"` |
+
+`@{...}` 표현식은 URL을 생성합니다. `@{/products/{id}(id=${product.id})}` 처럼 경로 변수를 괄호 안에서 바인딩합니다. 쿼리 파라미터도 같은 방식으로 추가할 수 있습니다: `@{/products(page=${page},size=${size})}`.
+
+---
+
+## Fragment 레이아웃 시스템
+
+HTML 페이지마다 `<head>`, 헤더, 푸터를 중복으로 작성하면 변경 시 모든 파일을 수동으로 수정해야 합니다. Thymeleaf의 `th:fragment`, `th:replace`, `th:insert`를 사용하면 공통 레이아웃을 한 곳에서 관리할 수 있습니다.
+
+### 공통 레이아웃 정의 (views/layout/base.html)
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:block th:fragment="pageTitle">Product Store</title>
+    <link rel="stylesheet" th:href="@{/static/css/main.css}">
+    <th:block th:fragment="headExtra"><!-- 페이지별 추가 스타일/스크립트 --></th:block>
+</head>
+<body>
+
+<!-- 헤더 fragment 삽입 -->
+<div th:replace="~{layout/header :: header}"></div>
+
+<!-- 페이지 콘텐츠 영역 — 각 페이지가 이 fragment를 오버라이드 -->
+<main th:fragment="content" class="main-content">
+    <!-- 각 페이지 내용 -->
+</main>
+
+<!-- 푸터 fragment 삽입 -->
+<div th:replace="~{layout/footer :: footer}"></div>
+
+<script th:src="@{/static/js/main.js}"></script>
+<th:block th:fragment="scriptExtra"><!-- 페이지별 추가 스크립트 --></th:block>
+</body>
+</html>
+```
+
+### 헤더 fragment (views/layout/header.html)
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<body>
+<header th:fragment="header" class="site-header">
+    <div class="container">
+        <a th:href="@{/}" class="logo">Product Store</a>
+        <nav class="main-nav">
+            <a th:href="@{/products}"
+               th:classappend="${#ctx.getRequest().getUri().toString().startsWith('/products') ? 'active' : ''}">
+                상품 관리
+            </a>
+        </nav>
+        <!-- 로그인 상태 표시 (9편에서 확장) -->
+        <div class="auth-area">
+            <a th:href="@{/login}">로그인</a>
+        </div>
+    </div>
+
+    <!-- 플래시 메시지 -->
+    <div th:if="${param.saved != null}"
+         class="flash flash-success">
+        저장되었습니다.
+    </div>
+    <div th:if="${param.error != null}"
+         class="flash flash-error"
+         th:text="${param.error}">
+        오류가 발생했습니다.
+    </div>
+</header>
+</body>
+</html>
+```
+
+### 푸터 fragment (views/layout/footer.html)
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<body>
+<footer th:fragment="footer" class="site-footer">
+    <div class="container">
+        <p>© 2026 Product Store. All rights reserved.</p>
+    </div>
+</footer>
+</body>
+</html>
+```
+
+### 실제 페이지에서 레이아웃 사용 (views/product/list.html)
+
+`th:replace`로 기본 레이아웃의 fragment를 현재 페이지 내용으로 교체합니다.
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+
+<!-- head: base.html의 pageTitle fragment를 교체 -->
+<head th:replace="~{layout/base :: head}">
+    <title>상품 목록 — Product Store</title>
+</head>
+
+<body>
+
+<!-- 헤더: base.html의 header fragment 삽입 -->
+<div th:replace="~{layout/header :: header}"></div>
+
+<!-- 이 페이지의 고유 내용 -->
+<main class="main-content">
+    <h1 th:text="${pageTitle}">상품 목록</h1>
+
+    <div class="toolbar">
+        <form th:action="@{/products}" method="get" class="search-form">
+            <input type="text" name="q" th:value="${searchQuery}" placeholder="상품명 검색">
+            <button type="submit">검색</button>
+        </form>
+        <a th:href="@{/products/new}" class="btn btn-primary">+ 상품 등록</a>
+    </div>
+
+    <div th:if="${#lists.isEmpty(products)}" class="empty-state">
+        <p>등록된 상품이 없습니다.</p>
+        <a th:href="@{/products/new}" class="btn">첫 상품 등록하기</a>
+    </div>
+
+    <table th:unless="${#lists.isEmpty(products)}" class="product-table">
+        <thead>
+            <tr>
+                <th>상품명</th>
+                <th>가격</th>
+                <th>재고</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr th:each="p : ${products}">
+                <td>
+                    <a th:href="@{/products/{id}(id=${p.id})}" th:text="${p.name}">상품명</a>
+                </td>
+                <td th:text="${#numbers.formatDecimal(p.price, 0, 'COMMA', 0, 'POINT')} + '원'">
+                    10,000원
+                </td>
+                <td th:text="${p.stock}">0</td>
+                <td class="actions">
+                    <a th:href="@{/products/{id}/edit(id=${p.id})}">수정</a>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</main>
+
+<!-- 푸터 -->
+<div th:replace="~{layout/footer :: footer}"></div>
+
+</body>
+</html>
+```
+
+`th:replace="~{layout/header :: header}"`의 문법을 풀어보면:
+- `~{...}` — fragment expression
+- `layout/header` — 템플릿 이름 (`views/layout/header.html`)
+- `:: header` — 해당 템플릿에서 `th:fragment="header"`로 선언된 fragment
+
+`th:replace`는 현재 태그를 fragment로 완전히 교체합니다. `th:insert`는 현재 태그 내부에 fragment를 삽입합니다. 헤더/푸터처럼 감싸는 태그가 불필요한 경우에는 `th:replace`가 더 자연스럽습니다.
+
+---
+
+## 폼 처리 (GET/POST 사이클)
+
+상품 등록 폼을 통해 완전한 GET → POST → Redirect 사이클을 구현합니다. 이 패턴은 PRG(Post-Redirect-Get)라고 부르며, 새로고침 시 폼이 재제출되는 문제를 방지합니다.
+
+### 폼 커맨드 객체와 검증 어노테이션
+
+```java
+import io.micronaut.core.annotation.Introspected;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+@Introspected  // Micronaut AOT 처리를 위해 필요
+public class ProductForm {
+
+    @NotBlank(message = "상품명은 필수입니다.")
+    @Size(min = 2, max = 100, message = "상품명은 2자 이상 100자 이하여야 합니다.")
+    private String name;
+
+    @NotBlank(message = "상품 설명은 필수입니다.")
+    @Size(max = 500, message = "상품 설명은 500자 이하여야 합니다.")
+    private String description;
+
+    @DecimalMin(value = "0.0", inclusive = true, message = "가격은 0원 이상이어야 합니다.")
+    private int price;
+
+    @Min(value = 0, message = "재고는 0개 이상이어야 합니다.")
+    private int stock;
+
+    // 기본 생성자 (폼 바인딩에 필요)
+    public ProductForm() {}
+
+    public ProductForm(String name, String description, int price, int stock) {
+        this.name = name;
+        this.description = description;
+        this.price = price;
+        this.stock = stock;
+    }
+
+    // getter / setter
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+
+    public int getPrice() { return price; }
+    public void setPrice(int price) { this.price = price; }
+
+    public int getStock() { return stock; }
+    public void setStock(int stock) { this.stock = stock; }
+}
+```
+
+`@Introspected`는 Micronaut AOT가 이 클래스의 프로퍼티 정보를 컴파일 타임에 분석하도록 지시합니다. reflection 없이 getter/setter를 호출하고, Bean Validation을 처리할 수 있게 됩니다.
+
+### 컨트롤러 — GET과 POST 처리
+
+```java
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.MediaType;
+import io.micronaut.http.annotation.Body;
+import io.micronaut.http.annotation.Consumes;
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.http.annotation.Post;
+import io.micronaut.views.ModelAndView;
+import io.micronaut.views.View;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Valid;
+
+import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
+
+@Controller("/products")
+public class ProductController {
+
+    private final ProductService productService;
+
+    public ProductController(ProductService productService) {
+        this.productService = productService;
+    }
+
+    // GET /products — 목록 페이지
+    @View("product/list")
+    @Get
+    public Map<String, Object> list() {
+        return Map.of(
+            "products", productService.findAll(),
+            "pageTitle", "상품 목록"
+        );
+    }
+
+    // GET /products/new — 등록 폼 (빈 폼)
+    @View("product/form")
+    @Get("/new")
+    public Map<String, Object> newForm() {
+        return Map.of(
+            "productForm", new ProductForm(),
+            "pageTitle", "상품 등록",
+            "formAction", "/products",
+            "errors", Map.of()
+        );
+    }
+
+    // POST /products — 등록 처리
+    @Post
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    public Object create(@Body @Valid ProductForm form) {
+        Product saved = productService.create(form);
+        // PRG: 등록 성공 후 목록 페이지로 리다이렉트
+        return HttpResponse.seeOther(URI.create("/products?saved=true"));
+    }
+
+    // GET /products/{id}/edit — 수정 폼
+    @View("product/form")
+    @Get("/{id}/edit")
+    public Map<String, Object> editForm(Long id) {
+        Product product = productService.findById(id)
+            .orElseThrow(() -> new ProductNotFoundException(id));
+        ProductForm form = new ProductForm(
+            product.getName(), product.getDescription(),
+            product.getPrice(), product.getStock()
+        );
+        return Map.of(
+            "productForm", form,
+            "pageTitle", "상품 수정",
+            "formAction", "/products/" + id,
+            "productId", id,
+            "errors", Map.of()
+        );
+    }
+}
+```
+
+### Bean Validation 오류 처리 — ExceptionHandler
+
+POST 요청에서 `@Valid` 검증이 실패하면 `ConstraintViolationException`이 발생합니다. 이 예외를 처리해서 폼 페이지를 다시 렌더링합니다.
+
+```java
+import io.micronaut.context.annotation.Requires;
+import io.micronaut.http.HttpRequest;
+import io.micronaut.http.HttpResponse;
+import io.micronaut.http.annotation.Produces;
+import io.micronaut.http.server.exceptions.ExceptionHandler;
+import io.micronaut.views.ModelAndView;
+import jakarta.inject.Singleton;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@Singleton
+@Produces
+@Requires(classes = {ConstraintViolationException.class})
+public class ValidationExceptionHandler
+        implements ExceptionHandler<ConstraintViolationException, HttpResponse<?>> {
+
+    @Override
+    public HttpResponse<?> handle(HttpRequest request, ConstraintViolationException exception) {
+        // 필드별 오류 메시지를 Map으로 변환
+        Map<String, String> fieldErrors = exception.getConstraintViolations()
+            .stream()
+            .collect(Collectors.toMap(
+                cv -> extractFieldName(cv.getPropertyPath().toString()),
+                ConstraintViolation::getMessage,
+                (msg1, msg2) -> msg1  // 같은 필드에 여러 오류가 있으면 첫 번째 사용
+            ));
+
+        // 요청 바디에서 폼 데이터를 복원 (사용자가 입력한 값 유지)
+        Map<String, Object> model = new HashMap<>();
+        model.put("errors", fieldErrors);
+        model.put("pageTitle", "상품 등록");
+        model.put("formAction", "/products");
+
+        // 요청 파라미터에서 폼 데이터 복원
+        ProductForm form = new ProductForm();
+        form.setName(request.getParameters().get("name", ""));
+        form.setDescription(request.getParameters().get("description", ""));
+        form.setPrice(request.getParameters().getFirst("price").map(Integer::parseInt).orElse(0));
+        form.setStock(request.getParameters().getFirst("stock").map(Integer::parseInt).orElse(0));
+        model.put("productForm", form);
+
+        return HttpResponse.unprocessableEntity()
+            .body(new ModelAndView<>("product/form", model));
+    }
+
+    private String extractFieldName(String propertyPath) {
+        // "create.form.name" → "name"
+        String[] parts = propertyPath.split("\\.");
+        return parts[parts.length - 1];
+    }
+}
+```
+
+### 폼 템플릿 (views/product/form.html)
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<head th:replace="~{layout/base :: head}">
+    <title>상품 등록 — Product Store</title>
+</head>
+<body>
+<div th:replace="~{layout/header :: header}"></div>
+
+<main class="main-content">
+    <h1 th:text="${pageTitle}">상품 등록</h1>
+
+    <form th:action="${formAction}"
+          th:object="${productForm}"
+          method="post"
+          class="product-form">
+
+        <!-- 상품명 -->
+        <div class="form-group" th:classappend="${errors['name'] != null ? ' has-error' : ''}">
+            <label for="name">상품명 <span class="required">*</span></label>
+            <input type="text"
+                   id="name"
+                   name="name"
+                   th:value="*{name}"
+                   placeholder="상품명을 입력하세요">
+            <span class="error-message"
+                  th:if="${errors['name'] != null}"
+                  th:text="${errors['name']}">
+                오류 메시지
+            </span>
+        </div>
+
+        <!-- 상품 설명 -->
+        <div class="form-group" th:classappend="${errors['description'] != null ? ' has-error' : ''}">
+            <label for="description">상품 설명 <span class="required">*</span></label>
+            <textarea id="description"
+                      name="description"
+                      rows="4"
+                      placeholder="상품 설명을 입력하세요"
+                      th:text="*{description}"></textarea>
+            <span class="error-message"
+                  th:if="${errors['description'] != null}"
+                  th:text="${errors['description']}">
+                오류 메시지
+            </span>
+        </div>
+
+        <!-- 가격 -->
+        <div class="form-group" th:classappend="${errors['price'] != null ? ' has-error' : ''}">
+            <label for="price">가격 (원)</label>
+            <input type="number"
+                   id="price"
+                   name="price"
+                   th:value="*{price}"
+                   min="0"
+                   placeholder="0">
+            <span class="error-message"
+                  th:if="${errors['price'] != null}"
+                  th:text="${errors['price']}">
+                오류 메시지
+            </span>
+        </div>
+
+        <!-- 재고 -->
+        <div class="form-group" th:classappend="${errors['stock'] != null ? ' has-error' : ''}">
+            <label for="stock">재고 수량</label>
+            <input type="number"
+                   id="stock"
+                   name="stock"
+                   th:value="*{stock}"
+                   min="0"
+                   placeholder="0">
+            <span class="error-message"
+                  th:if="${errors['stock'] != null}"
+                  th:text="${errors['stock']}">
+                오류 메시지
+            </span>
+        </div>
+
+        <div class="form-actions">
+            <a th:href="@{/products}" class="btn btn-secondary">취소</a>
+            <button type="submit" class="btn btn-primary">저장</button>
+        </div>
+    </form>
+</main>
+
+<div th:replace="~{layout/footer :: footer}"></div>
+</body>
+</html>
+```
+
+### PRG 패턴 흐름
+
+```
+브라우저                    서버
+  |                           |
+  |--- GET /products/new ---->|
+  |<-- 200 OK (폼 HTML) ------|
+  |                           |
+  |--- POST /products ------->|  (폼 제출)
+  |        ↓ 검증 성공         |
+  |<-- 303 See Other ---------|  Location: /products?saved=true
+  |                           |
+  |--- GET /products ----------|  (리다이렉트 따라가기)
+  |<-- 200 OK (목록 HTML) -----|
+  |                           |
+  (새로고침해도 GET 요청만 반복)
+```
+
+검증 실패 시 흐름:
+
+```
+브라우저                    서버
+  |                           |
+  |--- POST /products ------->|  (잘못된 데이터 제출)
+  |        ↓ 검증 실패         |
+  |<-- 422 Unprocessable Entity|  (폼 + 오류 메시지가 담긴 HTML)
+  |                           |
+  (리다이렉트 없음, 폼 페이지 그대로)
+```
+
+PRG 패턴의 핵심은 성공 시 리다이렉트(303)를 반환하여, 브라우저의 새로고침이 POST 재제출이 아닌 GET 요청이 되도록 하는 것입니다.
+
+---
+
+## 정적 리소스 서빙
+
+### application.yml 정적 리소스 설정
+
+CSS, JavaScript, 이미지 파일을 서빙하는 설정입니다.
+
+```yaml
+micronaut:
+  router:
+    static-resources:
+      default:
+        paths:
+          - classpath:static       # src/main/resources/static/
+          - file:src/main/resources/static  # 개발 시 파일 시스템에서 직접 서빙 (핫리로드)
+        mapping: /static/**
+        enabled: true
+```
+
+디렉토리 구조:
+
+```
+src/main/resources/
+├── static/
+│   ├── css/
+│   │   └── main.css
+│   ├── js/
+│   │   └── main.js
+│   └── images/
+│       └── logo.png
+└── views/
+    └── ...
+```
+
+`file:src/main/resources/static` 경로를 추가하면 CSS/JS 파일이 classpath가 아닌 파일 시스템에서 직접 서빙됩니다. Gradle/Maven 재빌드 없이 브라우저에서 즉시 확인할 수 있으나, Netty 서버 자체는 재시작 없이도 파일 변경을 인식합니다.[^file-serving] 프로덕션 빌드에서는 `classpath:static`만 남깁니다.
+
+[^file-serving]: 정적 파일 핫리로드는 서버 재시작과 무관하게 동작하지만, Java 클래스 변경이 함께 필요할 경우에는 별도로 서버를 재시작해야 합니다.
+
+### 템플릿에서 정적 리소스 참조
+
+```html
+<!-- CSS -->
+<link rel="stylesheet" th:href="@{/static/css/main.css}">
+
+<!-- JavaScript -->
+<script th:src="@{/static/js/main.js}"></script>
+
+<!-- 이미지 -->
+<img th:src="@{/static/images/logo.png}" alt="로고">
+```
+
+`@{/static/...}` 표현식은 Thymeleaf가 컨텍스트 경로를 자동으로 붙여줍니다. 애플리케이션을 서브패스에 배포하더라도 URL이 올바르게 생성됩니다.
+
+---
+
+## Locale & 메시지 국제화(i18n)
+
+### 메시지 파일 구성
+
+`src/main/resources/`에 메시지 프로퍼티 파일을 배치합니다.
+
+```
+src/main/resources/
+├── messages.properties          # 기본 (영어)
+├── messages_ko.properties       # 한국어
+└── messages_en.properties       # 영어 (명시적)
+```
+
+**messages.properties (기본값)**
+
+```properties
+product.list.title=Product List
+product.form.title.create=Create Product
+product.form.title.edit=Edit Product
+product.form.name=Product Name
+product.form.description=Description
+product.form.price=Price
+product.form.stock=Stock
+product.form.submit.create=Create
+product.form.submit.edit=Update
+product.form.cancel=Cancel
+product.saved=Product saved successfully.
+product.deleted=Product deleted.
+validation.required={0} is required.
+validation.size={0} must be between {1} and {2} characters.
+```
+
+**messages_ko.properties**
+
+```properties
+product.list.title=상품 목록
+product.form.title.create=상품 등록
+product.form.title.edit=상품 수정
+product.form.name=상품명
+product.form.description=상품 설명
+product.form.price=가격 (원)
+product.form.stock=재고 수량
+product.form.submit.create=등록
+product.form.submit.edit=수정
+product.form.cancel=취소
+product.saved=상품이 저장되었습니다.
+product.deleted=상품이 삭제되었습니다.
+validation.required={0}은(는) 필수 입력 항목입니다.
+validation.size={0}은(는) {1}자 이상 {2}자 이하여야 합니다.
+```
+
+### application.yml i18n 설정
+
+```yaml
+micronaut:
+  application:
+    name: product-store
+  views:
+    thymeleaf:
+      enabled: true
+```
+
+Micronaut은 Spring과 달리 `MessageSource`를 자동으로 등록하지 않습니다. `ResourceBundleMessageSource`를 Bean으로 직접 선언해야 합니다.[^messagesource] 로케일은 `Accept-Language` 헤더를 기준으로 선택됩니다.
+
+```java
+import io.micronaut.context.MessageSource;
+import io.micronaut.context.annotation.Factory;
+import io.micronaut.context.i18n.ResourceBundleMessageSource;
+import jakarta.inject.Singleton;
+
+@Factory
+public class MessageSourceFactory {
+
+    @Singleton
+    MessageSource messageSource() {
+        return new ResourceBundleMessageSource("messages");
+    }
+}
+```
+
+`"messages"`는 `messages.properties`, `messages_ko.properties` 등의 basename입니다.
+
+[^messagesource]: Micronaut i18n 공식 가이드: https://guides.micronaut.io/latest/localized-message-source-maven-java.html — `ResourceBundleMessageSource` Bean 선언으로 메시지 번들을 구성한다.
+
+### Thymeleaf에서 메시지 사용
+
+`#{...}` 표현식으로 메시지를 참조합니다.
+
+```html
+<h1 th:text="#{product.list.title}">상품 목록</h1>
+
+<label th:text="#{product.form.name}">상품명</label>
+
+<button type="submit"
+        th:text="#{product.form.submit.create}">
+    등록
+</button>
+
+<!-- 파라미터가 있는 메시지 -->
+<span th:text="#{validation.required(#{product.form.name})}">상품명은 필수입니다.</span>
+```
+
+Bean Validation 메시지도 `{}`를 사용해 메시지 파일에서 가져올 수 있습니다.
+
+```java
+// MessageSource를 통한 국제화된 검증 메시지
+@NotBlank(message = "{validation.required}")
+private String name;
+```
+
+Micronaut의 `MessageSource` Bean을 서비스에서 주입받아 사용할 수도 있습니다.
+
+```java
+import io.micronaut.context.MessageSource;
+import jakarta.inject.Singleton;
+import java.util.Locale;
+
+@Singleton
+public class ProductService {
+
+    private final MessageSource messageSource;
+
+    public ProductService(MessageSource messageSource) {
+        this.messageSource = messageSource;
+    }
+
+    public String getLocalizedMessage(String key, Locale locale) {
+        return messageSource.getMessage(key, locale)
+            .orElse(key);
+    }
+}
+```
+
+---
+
+## 보안 연계 미리보기 — 9편 연결
+
+9편에서 구현할 세션 기반 인증과 연동할 로그인 폼 페이지를 미리 살펴봅니다.
+
+### 로그인 폼 (views/auth/login.html)
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>로그인 — Product Store</title>
+    <link rel="stylesheet" th:href="@{/static/css/main.css}">
+</head>
+<body class="auth-page">
+<main class="login-container">
+    <h1>로그인</h1>
+
+    <!-- 로그인 실패 메시지 -->
+    <div th:if="${param.loginFailed}" class="alert alert-error">
+        이메일 또는 비밀번호가 올바르지 않습니다.
+    </div>
+
+    <!-- 미인증 접근 시 -->
+    <div th:if="${param.unauthorized}" class="alert alert-warning">
+        로그인이 필요한 페이지입니다.
+    </div>
+
+    <!--
+        Micronaut Security 기본 로그인 엔드포인트: POST /login
+        9편에서 micronaut.security.redirect.login-success=/products 설정으로
+        로그인 성공 시 /products로 리다이렉트
+    -->
+    <form action="/login" method="post">
+        <!-- CSRF 토큰 (9편에서 활성화) -->
+        <!-- <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"> -->
+
+        <div class="form-group">
+            <label for="username">이메일</label>
+            <input type="email"
+                   id="username"
+                   name="username"
+                   autocomplete="email"
+                   required
+                   placeholder="user@example.com">
+        </div>
+
+        <div class="form-group">
+            <label for="password">비밀번호</label>
+            <input type="password"
+                   id="password"
+                   name="password"
+                   autocomplete="current-password"
+                   required>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-full">로그인</button>
+    </form>
+</main>
+</body>
+</html>
+```
+
+이 템플릿은 9편에서 Micronaut Security가 `/login` POST 요청을 처리하도록 연동됩니다. 인증되지 않은 사용자가 `/products/new`에 접근하면 `/login?unauthorized`로 리다이렉트되고, 이 템플릿이 경고 메시지를 표시합니다.
+
+### 컨트롤러에서 인증 상태 확인 미리보기
+
+```java
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.security.annotation.Secured;
+import io.micronaut.security.rules.SecurityRule;
+import io.micronaut.views.View;
+
+import java.security.Principal;
+import java.util.Map;
+
+@Controller("/products")
+public class ProductController {
+
+    // 이 엔드포인트는 인증된 사용자만 접근 가능 (9편에서 상세 설명)
+    @Secured(SecurityRule.IS_AUTHENTICATED)
+    @View("product/form")
+    @Get("/new")
+    public Map<String, Object> newForm(Principal principal) {
+        // principal.getName() = 로그인한 사용자 이름
+        return Map.of(
+            "productForm", new ProductForm(),
+            "pageTitle", "상품 등록",
+            "formAction", "/products",
+            "errors", Map.of(),
+            "currentUser", principal.getName()
+        );
+    }
+}
+```
+
+---
+
+## 정리 & 다음 편 예고
+
+이번 편에서 Micronaut Views + Thymeleaf로 SSR 애플리케이션을 완성했습니다. 핵심을 정리합니다.
+
+**구성 요소별 역할:**
+
+| 구성 요소 | 역할 |
+|----------|------|
+| `micronaut-views-thymeleaf` | Thymeleaf 엔진을 Micronaut에 통합 |
+| `@View("template/name")` | 컨트롤러 메서드에서 렌더링할 뷰 지정 |
+| `ModelAndView` | 뷰 이름과 모델을 함께 반환 |
+| `th:fragment` / `th:replace` | 공통 레이아웃 재사용 |
+| `@Valid` + `@Introspected` | Bean Validation — AOT 친화적 폼 검증 |
+| `ExceptionHandler` | 검증 실패 시 폼 재렌더링 처리 |
+| PRG 패턴 | POST → 303 Redirect → GET으로 새로고침 안전성 확보 |
+| `#{message.key}` | 다국어 메시지 파일에서 텍스트 참조 |
+| `micronaut.router.static-resources` | CSS/JS/이미지 정적 파일 서빙 |
+
+**주의할 점:**
+- `@Introspected`를 폼 커맨드 객체에 반드시 붙여야 AOT 환경에서 Bean Validation이 동작합니다.
+- `th:action`에 `@{...}` URL 표현식을 사용해야 컨텍스트 패스가 올바르게 처리됩니다.
+- 개발 시 `cacheable: false`로 템플릿 캐시를 비활성화해야 변경이 즉시 반영됩니다.
+
+**다음 편: 9편 — 세션 기반 인증**
+
+이번 편에서 만든 로그인 폼과 `@Secured` 어노테이션을 실제로 동작시킵니다. Micronaut Security 모듈로 세션 기반 인증을 구현하고, 인메모리 방식과 Redis 방식을 비교합니다. CSRF 방어도 함께 다룹니다.
+
+---
+
+**이전 편**: [선언적 HTTP Client와 Virtual Thread](/posts/2026-02-22-micronaut-7-http-client)
+
+**다음 편**: [세션 기반 인증 — 인메모리 & Redis](/posts/2026-02-22-micronaut-9-security)

@@ -1,0 +1,440 @@
+---
+title: "Spring과 Micronaut 비교 — 무엇을 선택할까"
+description: "시작 시간, 메모리, 생태계, 개발 경험을 실제 수치로 비교하고, 각 프레임워크가 강점을 발휘하는 상황을 정리합니다."
+date: 2026-02-22
+category: "dev"
+tags: ["Java", "Micronaut", "Spring", "Framework", "AOT", "GraalVM", "Native"]
+series: "micronaut-guide"
+order: 4
+draft: false
+publish: true
+---
+
+3편까지 Micronaut의 내부 동작을 살펴봤습니다. 이제 가장 현실적인 질문을 다룹니다. **Spring Boot와 Micronaut, 무엇을 선택해야 하는가.**
+
+결론부터 말하면, 단순히 "Micronaut이 더 빠르니까 Micronaut"이 아닙니다. 각 프레임워크가 강점을 발휘하는 맥락이 다릅니다.
+
+---
+
+## 성능 비교
+
+### 시작 시간 / 메모리 비교
+
+아래는 PostgreSQL 연동, Thymeleaf 템플릿을 포함한 실질적인 웹 애플리케이션을 대상으로 측정한 수치입니다[^perf]. 단순 Hello World가 아니라 실제 스택에 가깝습니다.
+
+| 항목 | Spring Boot 3.5.6 | Micronaut 4.5.4 |
+|------|------------------|----------------|
+| JVM 시작 시간 | 1.909초 | 0.656초 |
+| JVM Max RSS | 388.9 MB | 253.2 MB |
+| Native 시작 시간 | 0.104초 | 0.050초 |
+| Native Max RSS | 149.4 MB | 83.8 MB |
+
+[^perf]: Jason Gauci, [Java 25 Framework Startup Benchmarks](https://gillius.org/blog/2025/10/java-25-framework-startup.html) (2025). 측정 환경: macOS 15.7, M2 Pro 16GB, Oracle GraalVM 25. Spring Boot는 Data JPA(Hibernate) + Tomcat, Micronaut은 Data JDBC + Netty 조합으로 구성이 완전히 동일하지는 않으므로 절대 수치보다 경향성을 참고하는 것이 적절합니다.
+
+Micronaut이 빠른 이유는 Bean 등록을 위한 런타임 classpath scanning과 reflection이 없기 때문입니다. 3편에서 살펴본 것처럼, Micronaut은 컴파일 타임에 생성된 `BeanDefinitionReference` 목록을 읽어 `BeanDefinition`을 로드할 뿐입니다.
+
+Spring Boot도 Lazy Initialization(`spring.main.lazy-initialization=true`)을 활성화하면 시작 시간을 줄일 수 있지만, 첫 요청 지연이 발생합니다.
+
+### Native Image 모드 특이사항
+
+| 항목 | Spring Boot Native | Micronaut Native |
+|------|-------------------|-----------------|
+| 빌드 복잡성 | 추가 AOT 힌트 필요 | 기본 동작 |
+| 빌드 시간 | 길다 (3분+)[^native-build] | 길다 (3분+)[^native-build] |
+| 서드파티 호환성 | 라이브러리별 상이 | 높음 |
+
+Native Image 빌드 시간 자체는 양쪽 모두 오래 걸립니다. GraalVM이 전체 코드를 정적 분석하기 때문입니다. 이것은 프레임워크가 아닌 GraalVM의 특성입니다.
+
+[^native-build]: 빌드 시간은 하드웨어 사양에 따라 크게 달라집니다. 최신 Apple 실리콘(M2 Pro 이상)처럼 메모리 접근 속도가 빠른 환경에서는 체감 시간이 훨씬 짧을 수 있습니다. CPU 코어 수, 사용 가능한 RAM, 프로젝트 규모가 주요 변수입니다.
+
+---
+
+## 생태계 비교
+
+### Spring: 방대한 Starter 생태계
+
+Spring Boot의 가장 큰 강점은 생태계입니다.
+
+- **Spring Data**: JPA, MongoDB, Redis, Elasticsearch 등 수십 개의 데이터 모듈
+- **Spring Security**: 인증/인가의 사실상 표준
+- **Spring Cloud**: 마이크로서비스 패턴 라이브러리 모음
+- **Spring Batch**: 배치 처리
+- **Spring Integration**: 엔터프라이즈 통합 패턴
+- **수백 개의 커뮤니티 Starter**: 주요 라이브러리들이 Spring Starter를 제공
+
+Java 생태계에서 가장 넓은 통합 모듈 커버리지를 가진 프레임워크입니다.
+
+### Micronaut: 엄선된 통합 모듈
+
+Micronaut은 선별된 통합 모듈을 제공합니다.
+
+- **Micronaut Data**: JPA (Hibernate), R2DBC, JDBC, MongoDB
+- **Micronaut Security**: JWT, Session, OAuth2
+- **Micronaut Kafka, RabbitMQ**: 메시지 브로커
+- **Micronaut Redis, GCP, AWS, Azure**: 클라우드 통합
+- **Micronaut OpenAPI**: Swagger 문서 자동 생성
+
+Spring에 비하면 모듈 수가 적지만, REST API + RDBMS 기반의 서비스에 필요한 핵심 모듈은 갖추고 있습니다.
+
+### 솔직하게 부족한 것들
+
+- **Spring Batch 대응**: Micronaut에는 Spring Batch 수준의 배치 처리 프레임워크가 없습니다.
+- **커뮤니티 크기**: Spring에 비해 한국어 자료, Q&A, 스택오버플로우 답변이 적습니다.
+- **레거시 라이브러리 호환성**: 오래된 Spring 기반 라이브러리는 Micronaut에서 동작하지 않을 수 있습니다.
+- **Spring Security의 깊이**: Micronaut Security는 충분히 기능적이지만 Spring Security만큼 세밀한 제어가 어려울 수 있습니다.
+
+---
+
+## 개발 경험 비교
+
+### DI / AOP 사용법 비교
+
+가장 일반적인 패턴을 나란히 비교합니다.
+
+**서비스 선언:**
+
+```java
+// Spring Boot
+@Service
+public class OrderService {
+    private final OrderRepository repository;
+
+    @Autowired  // 또는 생략 가능 (생성자 주입)
+    public OrderService(OrderRepository repository) {
+        this.repository = repository;
+    }
+}
+
+// Micronaut
+@Singleton
+public class OrderService {
+    private final OrderRepository repository;
+
+    @Inject  // 또는 생략 가능 (생성자 주입)
+    public OrderService(OrderRepository repository) {
+        this.repository = repository;
+    }
+}
+```
+
+사실상 동일합니다. 어노테이션 이름만 다릅니다.
+
+**REST 컨트롤러:**
+
+```java
+// Spring Boot
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Order> getOrder(@PathVariable Long id) {
+        return ResponseEntity.ok(orderService.findById(id));
+    }
+
+    @PostMapping
+    public ResponseEntity<Order> createOrder(@RequestBody @Valid OrderRequest req) {
+        Order order = orderService.create(req);
+        return ResponseEntity.status(HttpStatus.CREATED).body(order);
+    }
+}
+
+// Micronaut
+@Controller("/orders")
+public class OrderController {
+
+    @Get("/{id}")
+    public Order getOrder(Long id) {
+        return orderService.findById(id);
+    }
+
+    @Post
+    @Status(HttpStatus.CREATED)
+    public Order createOrder(@Body @Valid OrderRequest req) {
+        return orderService.create(req);
+    }
+}
+```
+
+Micronaut은 `ResponseEntity` 없이 직접 반환 타입을 사용합니다. 상태 코드는 `@Status` 어노테이션으로 지정합니다. Spring처럼 `ResponseEntity<T>`를 사용하는 방식도 지원합니다.
+
+**AOP — Transactional:**
+
+```java
+// Spring Boot
+@Service
+public class OrderService {
+
+    @Transactional
+    public Order createOrder(OrderRequest req) {
+        // DB 작업
+    }
+}
+
+// Micronaut
+@Singleton
+public class OrderService {
+
+    @Transactional  // io.micronaut.transaction.annotation.Transactional
+    public Order createOrder(OrderRequest req) {
+        // DB 작업
+    }
+}
+```
+
+어노테이션 패키지만 다릅니다. 동작은 동일하며, Micronaut은 이를 컴파일 타임에 프록시로 처리합니다.
+
+### Configuration 바인딩
+
+```java
+// Spring Boot
+@Component
+@ConfigurationProperties("app.order")
+public class OrderConfig {
+    private int maxItemsPerOrder = 10;
+    private boolean enableDiscount = false;
+    // getter/setter
+}
+
+// Micronaut
+@ConfigurationProperties("app.order")
+public class OrderConfig {
+    private int maxItemsPerOrder = 10;
+    private boolean enableDiscount = false;
+    // getter/setter
+}
+```
+
+`@Component`가 없다는 것 외에는 동일합니다. Micronaut은 `@ConfigurationProperties`가 붙은 클래스를 annotation processor가 Bean으로 등록합니다.
+
+### 테스트 지원
+
+```java
+// Spring Boot
+@SpringBootTest
+@AutoConfigureMockMvc
+class OrderControllerTest {
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @Test
+    void getOrder_returnOrderJson() throws Exception {
+        mockMvc.perform(get("/orders/1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.id").value(1));
+    }
+}
+
+// Micronaut
+@MicronautTest
+class OrderControllerTest {
+
+    @Inject
+    @Client("/")
+    HttpClient client;
+
+    @Test
+    void getOrder_returnOrderJson() {
+        Order order = client.toBlocking()
+            .retrieve(HttpRequest.GET("/orders/1"), Order.class);
+
+        assertThat(order.getId()).isEqualTo(1L);
+    }
+}
+```
+
+Micronaut 테스트는 실제 HTTP 클라이언트를 사용합니다. MockMvc처럼 HTTP 레이어를 우회하지 않아서 더 현실적인 테스트가 가능합니다. 반면 Spring MockMvc의 세밀한 검증 체인(`andExpect`, `jsonPath` 등)은 없습니다.
+
+Bean을 Mock으로 교체하는 방법:
+
+```java
+// Spring Boot
+@SpringBootTest
+class OrderServiceTest {
+
+    @MockBean
+    OrderRepository mockRepository;
+
+    @Autowired
+    OrderService orderService;
+}
+
+// Micronaut
+@MicronautTest
+class OrderServiceTest {
+
+    @MockBean(OrderRepository.class)
+    OrderRepository mockRepository() {
+        return mock(OrderRepository.class);
+    }
+
+    @Inject
+    OrderService orderService;
+}
+```
+
+---
+
+## Spring 개발자라면 충분히 적응 가능한 이유
+
+### Bean 직접 만들던 개발자라면 쉽다
+
+Spring을 오래 사용한 개발자라면 Micronaut은 매우 친숙합니다. DI, AOP, 설정 바인딩, REST API — 모든 개념이 Spring에서 배운 것과 동일합니다. 어노테이션 이름만 다릅니다.
+
+오히려 Spring의 "마법 같은" 동작을 이해하고 있는 개발자에게 Micronaut의 명시적인 처리가 더 직관적으로 느껴지는 경우도 있습니다.
+
+### JSR-330 표준 준수
+
+Micronaut은 JSR-330 (Dependency Injection for Java) 표준을 준수합니다.
+
+| JSR-330 | Spring 대응 | Micronaut |
+|---------|------------|-----------|
+| `@Inject` | `@Autowired` | `@Inject` |
+| `@Named` | `@Qualifier` | `@Named` |
+| `@Singleton` | `@Component` | `@Singleton` |
+| `Provider<T>` | `ObjectProvider<T>` | `Provider<T>` |
+
+Spring도 JSR-330을 인식합니다. 즉, Micronaut 코드의 DI 어노테이션은 Spring에서도 그대로 동작합니다.
+
+### micronaut-spring: Spring 어노테이션 호환 레이어
+
+어노테이션 이름 차이가 부담스럽다면 `micronaut-spring` 모듈을 활용할 수 있습니다. 이 모듈은 Spring 어노테이션을 그대로 인식하여 Micronaut Bean으로 처리합니다[^micronaut-spring].
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    // 핵심 DI/스테레오타입/설정 어노테이션
+    annotationProcessor("io.micronaut.spring:micronaut-spring-annotation")
+    // Spring MVC(@RestController, @GetMapping 등) 지원
+    annotationProcessor("io.micronaut.spring:micronaut-spring-web-annotation")
+    // Spring Boot(@ConfigurationProperties 등) 지원
+    annotationProcessor("io.micronaut.spring:micronaut-spring-boot-annotation")
+    runtimeOnly("io.micronaut.spring:micronaut-spring-web")
+    runtimeOnly("io.micronaut.spring:micronaut-spring-boot")
+}
+```
+
+주요 지원 어노테이션은 다음과 같습니다.
+
+| 분류 | 지원 Spring 어노테이션 |
+|------|----------------------|
+| 스테레오타입 | `@Component`, `@Service`, `@Repository` |
+| 의존성 주입 | `@Autowired`, `@Qualifier`, `@Value` |
+| 설정 | `@Configuration`, `@Bean`, `@Import`, `@Primary`, `@Profile` |
+| REST | `@RestController`, `@GetMapping`, `@PostMapping`, `@RequestBody`, `@PathVariable`, `@RequestParam` |
+| 스케줄링/비동기 | `@Scheduled`, `@Async` |
+| 이벤트 | `@EventListener` |
+| 캐시 | `@Cacheable`, `@CacheEvict`, `@CachePut` |
+| 데이터 | `@Id`, `@Transient`, `@Version`, `@PersistenceConstructor` |
+
+단, AspectJ, Spring Expression Language(SpEL), Servlet API는 지원하지 않습니다. 기존 Spring 코드를 Micronaut으로 점진적으로 이전하거나, Spring 어노테이션에 익숙한 팀이 온보딩 비용을 줄이는 용도로 유용합니다.
+
+[^micronaut-spring]: 지원 어노테이션 전체 목록은 [Micronaut for Spring 공식 문서](https://micronaut-projects.github.io/micronaut-spring/latest/guide/)를 참고하세요.
+
+### 달라지는 것들, 달라지지 않는 것들
+
+**달라지지 않는 것들:**
+- DI 컨테이너의 개념 (Singleton, Prototype, Request Scope)
+- AOP 인터셉터 패턴
+- 설정 바인딩 (`@ConfigurationProperties`)
+- REST API 설계 방식
+- Junit 5 기반 테스트
+- YAML/Properties 설정 파일
+
+**달라지는 것들:**
+- 어노테이션 이름 (대부분 직관적으로 매핑됨)
+- `ResponseEntity` 대신 직접 반환 (선택적)
+- Bean 등록을 위한 런타임 classpath scanning 없음 → 컴파일 타임에 등록 완료
+- `@SpringBootApplication` → `Micronaut.run()`
+- Spring Security 대신 Micronaut Security
+- `MockMvc` 대신 `HttpClient`를 사용한 통합 테스트
+
+---
+
+## 추천 사용 케이스
+
+### Micronaut을 고려할만한 경우
+
+**1. 클라우드 비용이 중요한 서비스**
+
+수십~수백 개의 마이크로서비스를 운영한다면, 각 서비스의 메모리가 줄어드는 것이 비용에 직결됩니다. 앞서 벤치마크 기준으로는 JVM 모드에서 약 35%(388.9 MB → 253.2 MB) 차이가 났습니다[^perf]. Native Image까지 적용하면 더 극적입니다.
+
+**2. 서버리스 / 이벤트 기반 함수**
+
+AWS Lambda, Google Cloud Functions, Azure Functions에서 JVM 콜드 스타트는 요청 지연의 주원인입니다. Micronaut Native Image는 이 문제를 잘 해결합니다.
+
+**3. 빠른 재시작이 중요한 환경**
+
+병원 시스템, 금융 시스템처럼 장애 복구 속도가 중요한 환경에서 시작 시간 단축은 MTTR(Mean Time To Recovery)에 직접 영향을 줍니다.
+
+**4. 새 프로젝트, Spring 의존성이 없는 경우**
+
+기존 Spring 라이브러리나 Spring 특화 기능에 의존성이 없는 새 프로젝트라면 Micronaut을 고려할 가치가 충분합니다.
+
+**5. GraalVM Native Image를 목표로 하는 프로젝트**
+
+Native Image를 처음부터 목표로 한다면 Micronaut이 훨씬 수월합니다.
+
+### Spring Boot가 여전히 나은 경우
+
+**1. 복잡한 레거시 Spring 코드베이스와 통합**
+
+기존 Spring 기반 라이브러리, Spring Cloud 구성요소, Spring Batch 파이프라인과 함께 써야 한다면 Spring Boot가 유일한 선택입니다.
+
+**2. Spring Security의 세밀한 기능이 필요한 경우**
+
+OAuth2 Resource Server, Method Security, SAML 등 Spring Security의 고급 기능이 필요하다면 Spring이 더 성숙합니다.
+
+**3. 팀이 Spring에 깊이 투자되어 있는 경우**
+
+팀 전체가 Spring 전문가이고, 학습 비용 없이 빠르게 개발해야 한다면 Spring Boot가 낫습니다. 프레임워크 전환에는 항상 학습 비용이 있습니다.
+
+**4. 커뮤니티 지원이 중요한 경우**
+
+한국어 자료, 스택오버플로우 답변, 팀 내 지식 공유를 고려하면 Spring의 생태계가 압도적으로 유리합니다.
+
+**5. Spring Cloud가 필요한 마이크로서비스**
+
+Eureka, Config Server, Gateway, Circuit Breaker 등 Spring Cloud 생태계를 활용한다면 Spring Boot가 자연스럽습니다. Micronaut도 일부 Cloud 통합을 제공하지만 Spring Cloud의 깊이에는 못 미칩니다.
+
+---
+
+## 종합 비교표
+
+| 항목 | Spring Boot 3.x | Micronaut 4.x |
+|------|----------------|--------------|
+| DI 방식 | 런타임 Reflection | 컴파일 타임 생성 |
+| AOP 프록시 | 런타임 CGLIB | 컴파일 타임 바이트코드 |
+| 시작 시간 (JVM) | 1.9초[^perf] | 0.66초[^perf] |
+| 시작 시간 (Native) | 0.10초[^perf] | 0.05초[^perf] |
+| 메모리 (JVM, Max RSS) | 389 MB[^perf] | 253 MB[^perf] |
+| 메모리 (Native, Max RSS) | 149 MB[^perf] | 84 MB[^perf] |
+| 컴파일 오류 감지 | 런타임 | 컴파일 타임 |
+| GraalVM 지원 | 추가 AOT 힌트 필요 | reflection-free 설계로 자연 호환 |
+| Starter/통합 수 | 수백 개 | 수십 개 |
+| 한국어 자료 | 풍부 | 드묾 |
+| 학습 곡선 (Spring 경험자) | N/A | 낮음 |
+| Spring Security 수준 | 매우 성숙 | 기본 기능 |
+| 배치 처리 | Spring Batch | 없음 |
+| 커뮤니티 크기 | 매우 큼 | 작음 |
+
+---
+
+## 마치며
+
+이 연작 시리즈를 통해 Micronaut의 탄생 배경부터 내부 동작, 그리고 Spring과의 실질적인 차이를 살펴봤습니다.
+
+Micronaut은 Spring의 문제점을 비판하며 등장한 것이 아닙니다. Spring은 그것이 만들어진 시대의 제약 속에서 최선의 선택을 했고, 지금도 대부분의 Java 프로젝트에서 훌륭하게 동작합니다.
+
+Micronaut은 클라우드, 컨테이너, 서버리스 환경이 요구하는 새로운 특성(빠른 시작, 낮은 메모리, Native Image 호환성)을 컴파일 타임 AOT 처리로 달성하는 프레임워크입니다.
+
+Spring에 익숙한 개발자라면 Micronaut으로의 전환 비용은 생각보다 낮습니다. 개념은 같고 어노테이션 이름만 다를 뿐입니다. 다음 프로젝트에서 콜드 스타트가 중요하거나 메모리 비용이 고려 사항이라면, Micronaut을 선택지에 올려보시기 바랍니다.
+
+---
+
+**이전 편**: [컴파일 타임의 마법 — 내부 동작 심층 분석](/posts/2026-02-22-micronaut-3-internals)
+
+**다음 편**: [HTTP 서버 모델과 Virtual Thread — Netty, EventLoop, 그리고 가상 스레드가 바꾼 선택 기준](/posts/2026-02-22-micronaut-5-http-and-vt)
+
+**시리즈 처음으로**: [AOT의 시대를 열다 — Micronaut 소개와 역사적 맥락](/posts/2026-02-22-micronaut-1-intro)
