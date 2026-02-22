@@ -19,35 +19,86 @@ const seriesPosts = posts
   });
 ---
 
-{
-  seriesPosts.length > 0 && (
-    <nav class="series-container mb-8 p-4 bg-[var(--color-bg-secondary)] rounded-lg border border-[var(--color-border)]" aria-label={`Series: ${series}`}>
-      <h3 class="text-sm font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-3">
-        Series: {series}
-      </h3>
-      <ul class="space-y-2">
-        {seriesPosts.map((post) => {
-          const isCurrent = post.slug === currentSlug;
-          return (
-            <li class="flex items-start gap-2">
-              <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] flex-shrink-0 opacity-50" />
-              {isCurrent ? (
-                <span class="text-sm font-medium text-[var(--color-accent)]">
-                  {post.data.title}
-                  <span class="ml-2 text-xs text-[var(--color-text-secondary)] font-normal">(Current)</span>
-                </span>
-              ) : (
-                <a
-                  href={`/blog/${post.slug}`}
-                  class="text-sm text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
-                >
-                  {post.data.title}
-                </a>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </nav>
-  )
-}
+{seriesPosts.length > 0 && (
+  <details
+    id="series-nav"
+    data-series={series}
+    open
+    class="mb-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] overflow-hidden"
+  >
+    <summary class="series-summary flex items-center justify-between gap-4 px-4 py-3 cursor-pointer select-none hover:bg-[var(--color-border)]/20 transition-colors">
+      <span class="text-sm font-bold uppercase tracking-wider text-[var(--color-text-secondary)]">
+        시리즈: {series}
+        <span class="ml-1.5 font-normal normal-case tracking-normal">({seriesPosts.length}편)</span>
+      </span>
+      <svg
+        class="series-chevron w-4 h-4 text-[var(--color-text-secondary)] transition-transform duration-200 flex-shrink-0"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
+    </summary>
+    <ol class="space-y-2 px-4 pb-4 pt-1" type="1">
+      {seriesPosts.map((post) => {
+        const isCurrent = post.slug === currentSlug;
+        return (
+          <li class="flex items-start gap-2">
+            <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] flex-shrink-0 opacity-50" />
+            {isCurrent ? (
+              <span class="text-sm font-medium text-[var(--color-accent)]">
+                {post.data.title}
+                <span class="ml-2 text-xs text-[var(--color-text-secondary)] font-normal">(현재)</span>
+              </span>
+            ) : (
+              <a
+                href={`/blog/${post.slug}`}
+                class="text-sm text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
+              >
+                {post.data.title}
+              </a>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  </details>
+)}
+
+<style>
+  .series-summary {
+    list-style: none;
+  }
+  .series-summary::-webkit-details-marker {
+    display: none;
+  }
+</style>
+
+<script>
+  const el = document.getElementById("series-nav") as HTMLDetailsElement | null;
+  if (el) {
+    const key = `series-open:${el.dataset.series ?? ""}`;
+    const chevron = el.querySelector(".series-chevron") as SVGElement | null;
+
+    function syncChevron(open: boolean) {
+      if (chevron) chevron.style.transform = open ? "rotate(180deg)" : "";
+    }
+
+    // sessionStorage는 탭 세션 내 뒤로가기/앞으로가기 전체에서 유지됨
+    const saved = sessionStorage.getItem(key);
+    if (saved !== null) {
+      el.open = saved === "true";
+    }
+    syncChevron(el.open);
+
+    el.addEventListener("toggle", () => {
+      sessionStorage.setItem(key, String(el.open));
+      syncChevron(el.open);
+    });
+  }
+</script>

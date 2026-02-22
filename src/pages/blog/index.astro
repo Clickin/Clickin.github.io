@@ -3,7 +3,12 @@ import BaseLayout from "../../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { postUrl } from "../../lib/slug";
 const posts = (await getCollection("posts", ({ data }) => !data.draft && data.publish !== false))
-  .sort((a, b) => (b.data.updated ?? b.data.date).valueOf() - (a.data.updated ?? a.data.date).valueOf());
+  .sort((a, b) => {
+    const dateDiff = (b.data.updated ?? b.data.date).valueOf() - (a.data.updated ?? a.data.date).valueOf();
+    if (dateDiff !== 0) return dateDiff;
+    // 날짜가 같은 연작은 order 내림차순 (최신 편이 위)
+    return (b.data.order ?? 0) - (a.data.order ?? 0);
+  });
 ---
 <BaseLayout title="Blog" description="All posts">
   <h1 class="text-3xl sm:text-4xl font-extrabold mb-8">Blog</h1>
@@ -29,7 +34,12 @@ const posts = (await getCollection("posts", ({ data }) => !data.draft && data.pu
               {p.data.date.toISOString().slice(0, 10)}
             </time>
           </div>
-          <div class="flex items-center gap-2 mt-3">
+          <div class="flex items-center gap-2 mt-3 flex-wrap">
+            {p.data.series && (
+              <span class="text-xs px-2 py-0.5 rounded-full border border-[var(--color-accent)] text-[var(--color-accent)]">
+                {p.data.series}{p.data.order != null ? ` · ${p.data.order}편` : ""}
+              </span>
+            )}
             <span class="text-xs px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)]">
               {p.data.category}
             </span>
