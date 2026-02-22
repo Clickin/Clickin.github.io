@@ -1,6 +1,6 @@
 ---
 title: "Java G1GC 최적화 실무기: Full GC 제거부터 tail latency 분석까지"
-description: "JDK 8 G1GC 서비스에서 2~3초 Full GC를 제거하고, GC 로그 심층 분석으로 tail latency 원인을 추적한 실무 경험을 정리했습니다."
+description: "JDK 8 G1GC 서비스에서 2-3초 Full GC를 제거하고, GC 로그 심층 분석으로 tail latency 원인을 추적한 실무 경험을 정리했습니다."
 date: 2026-02-22
 category: "dev"
 tags: ["java", "jvm", "jdk", "gc", "performance"]
@@ -14,7 +14,7 @@ jmx_exporter + prometheus + grafana 스택으로 모니터링하면서 메인 �
 다른 서비스 장애때문에 각종 로그를 살펴보다가 gc로그도 살펴봤는데 로그에 정보가 너무 없었습니다. 그래서 다른 서비스 장애를 복구하면서 jvm 옵션에 `PrintGCDetails` 을 추가하고 데이터를 모아 그동안 벼르고 있던 gc 문제를 파악해보기로 했죠.
 
 상세한 gc로그를 약 2주간 수집하고 보니 상황이 그닥 좋지 않았습니다.
-피크 시간대에 Full GC가 평균 2-3분 간격으로 발생하고, 한 번 터지면 2~3초씩 STW가 걸리고 있었습니다.
+피크 시간대에 Full GC가 평균 2-3분 간격으로 발생하고, 한 번 터지면 2-3초씩 STW가 걸리고 있었습니다.
 처음엔 "**MaxGCPauseMillis를 낮추면** Full GC 시간도 줄어들지 않을까?"라고 생각했습니다.
 
 알고 보니 이건 잘못된 접근이었습니다.
@@ -67,7 +67,7 @@ staging 환경에서 heap dump를 뽑아 [Eclipse MAT](https://eclipse.dev/mat/)
 
 ![일별 Full GC 발생 횟수](./fullgc-daily.svg)
 
-시간대별로 보면 피크는 업무 시작(08:00)과 오후 집중 시간대(14:00~16:00)입니다.
+시간대별로 보면 피크는 업무 시작(08:00)과 오후 집중 시간대(14:00-16:00)입니다.
 
 ![시간대별 Full GC 발생 패턴](./fullgc-hourly.svg)
 
@@ -146,8 +146,8 @@ XML 파서(특히 `SAXParser`, `DocumentBuilder` 계열)는 생성 비용이 크
 기존 구현과 변경된 구현을 비교해보면 문제를 알 수 있습니다.
 
 수정 전 코드에서는 ArrayList[^ArrayList]와 HashMap[^HashMap]의 bucket size를 지정하지 않고 모두 기본값으로 사용하는 문제가 있습니다. 데이터를 얼마나 추가할 지 모르는 상황이거나 없을 수 있다면 적절한 선택이지만, 현재 상황은 그렇지 않죠. HTTP 파싱에선 모든 항목의 갯수를 미리 알 수 있고, ResultSet 파싱 에서는 Column의 갯수를 알 수 있습니다.
-[^ArrayList]: 기본값으로 0, 하나라도 원소를 추가한다면 10으로 시작
-[^HashMap]: 기본값으로 initial capacity 16, load factor 0.75
+[^ArrayList]: 기본값 크기로 최초는 0, 하나라도 원소를 추가한다면 10
+[^HashMap]: 기본값 크기로 initial capacity 16, load factor 0.75
 아래는 문제 패턴 재현 예시입니다. (실제 코드와 무관)
 
 #### 1. HTTP parsing
@@ -294,7 +294,7 @@ Evacuation failure는 humongous 객체가 Old Gen에 쌓이면서 빈 region이 
 ### G1HeapRegionSize: (미설정) → 8m
 
 16GB 힙에서 JVM 기본값으로 결정되는 region 크기를 명시로 고정했습니다.
-Humongous 임계가 2MB → **4MB로 올라가서**, 2~4MB 객체들이 humongous 취급을 벗어날 수 있습니다.
+Humongous 임계가 2MB → **4MB로 올라가서**, 2-4MB 객체들이 humongous 취급을 벗어날 수 있습니다.
 
 Region을 16m으로 더 키우는 것도 검토했습니다. 임계가 8MB로 올라가면 humongous 빈도가 더 줄어들겠지만, region 수가 절반으로 줄어들어 Mixed GC의 granularity가 떨어지는 단점이 있습니다. 당시 상황에서는 8m이 적절한 균형이라 판단했습니다.
 
@@ -345,7 +345,7 @@ Humongous allocation failure가 9회(12일간)에 불과한 것도 의미 있는
 1차 적용 결과를 모니터링하던 중 추가 문제를 발견했습니다.
 GC 로그 분석과 `async-profiler` 프로파일링 결과, `char[]`와 `byte[]`를 지속적으로 생성하여 GC 압력이 높아지는 패턴이 남아 있었습니다.
 
-원인을 추적해보니, DB에서 CLOB/BLOB을 읽는 Reader 구현이 `char[]`를 매번 두 배씩 늘려가며 새로 할당하는 방식으로 작성되어 있었습니다.
+원인을 추적해보니, DB에서 CLOB/BLOB을 읽는 Reader 구현이 `char[]/byte[]`를 매번 두 배씩 늘려가며 새로 할당하는 방식으로 작성되어 있었습니다.
 
 아래는 문제 패턴 재현 예시입니다. (실제 코드와 무관)
 
@@ -358,16 +358,27 @@ public String readClob(Reader reader) throws IOException {
     while ((n = reader.read(buf, totalRead, buf.length - totalRead)) != -1) {
         totalRead += n;
         if (totalRead == buf.length) {
-            char[] bigger = new char[buf.length * 2]; // 매번 새 배열 할당
-            System.arraycopy(buf, 0, bigger, 0, buf.length);
-            buf = bigger;
+            char[] bigger = new char[buf.length * 2]; // 매번 새 배열 할당 // [!code --]
+            System.arraycopy(buf, 0, bigger, 0, buf.length); // [!code --]
+            buf = bigger; // [!code--]
         }
     }
-    return new String(buf, 0, totalRead);
+    return new String(buf, 0, totalRead); // [!code --]
+}
+
+// 수정 후: StringBuilder로 배열 복사 없이 누적
+public String readClob(Reader reader) throws IOException {
+    char[] buf = new char[1024]; 
+    StringBuilder sb = new StringBuilder(); // [!code ++]
+    int n;
+    while ((n = reader.read(buf)) != -1) { // [!code ++]
+        sb.append(buf, 0, n); // 실제 읽은 만큼만 누적 // [!code ++]
+    }
+    return sb.toString(); // [!code ++]
 }
 ```
 
-실제 운영 환경에서 오라클 SQL 쿼리 하나로 CLOB를 사용해 A4용지 100페이지 가량의 HTML을 생성하는 경우가 종종 있는데, 앞선 로직에서 이 배열이 수십~수백 회 재할당되고, 최종 결과물 역시 수 MB짜리 `char[]`가 됩니다.
+실제 운영 환경에서 오라클 SQL 쿼리 하나로 CLOB를 사용해 A4용지 기준 100페이지 이상인 HTML을 생성하는 경우가 종종 있는데, 앞선 로직에서 이 배열이 수십-수백 회 재할당되고, 최종 결과물 역시 4MB 가량의 `char[]`가 됩니다.
 `G1HeapRegionSize=8m` 환경에서는 중간 단계에서 사용한 여러 배열들이 gc 압박을 가하는데다 마지막으로 생성된 4MB 이상 배열이 humongous 대상이 되어 Young GC를 우회해 Old Gen에 직접 쌓입니다.
 
 수정 방향: `StringBuilder` 또는 크기 추정 후 단일 배열 할당 방식으로 교체했습니다.
@@ -377,7 +388,7 @@ public String readClob(Reader reader) throws IOException {
 
 ## 8) outlier 원인 분석
 
-Full GC는 사라졌지만, Young GC에서 40~65ms짜리 outlier가 간헐적으로 남아있었습니다. 평상시 Young GC가 10~20ms인 것과 비교하면 2~3배 수준입니다.
+Full GC는 사라졌지만, Young GC에서 40-65ms짜리 outlier가 간헐적으로 남아있었습니다. 평상시 Young GC가 10-20ms인 것과 비교하면 2-3배 수준입니다.
 
 65ms outlier의 GC 로그를 뜯어봤습니다.
 
@@ -414,7 +425,7 @@ Humongous 이벤트도 피크 시간대(업무 시작/오후)에 집중되는 �
 | Full GC | 2-3초, 2-3분 간격 | 0회 |
 | Evacuation failure | Young GC의 26% | 0회 |
 | Mixed GC | 관측된 적 없음 | 정상 동작, 평균 5ms |
-| Young GC outlier | (Full GC에 묻혀 분석 불가) | 40~65ms 간헐적 |
+| Young GC outlier | (Full GC에 묻혀 분석 불가) | 40-65ms 간헐적 |
 
 가장 오래 걸린 부분은 "MaxGCPauseMillis로 Full GC를 1초로 줄이겠다"는 초기 접근이 틀렸다는 걸 깨닫고 방향을 바꾸는 것이었습니다.
 Full GC가 터지는 근본 원인(evacuation failure → Allocation Failure)을 막아야지, 터진 Full GC의 시간을 줄이는 건 의미가 없었습니다.
