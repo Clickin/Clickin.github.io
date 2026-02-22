@@ -92,7 +92,9 @@ dependencies {
     // HikariCP 커넥션 풀 (micronaut-jdbc-hikari에 포함)
     implementation("io.micronaut.sql:micronaut-jdbc-hikari")
 
-    // 직렬화 (JSON 응답)
+    // Jackson Annotations facade — @JsonProperty 등 사용 가능.
+    // 실제 직렬화 로직은 micronaut-serde-processor가 컴파일 타임에 생성한 코드가 수행.
+    // jackson-databind(리플렉션 기반 ObjectMapper)는 포함되지 않는다.
     implementation("io.micronaut.serde:micronaut-serde-jackson")
 
     // Validation

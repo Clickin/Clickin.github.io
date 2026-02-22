@@ -75,8 +75,13 @@ demo/
 
 ```kotlin
 dependencies {
+    // HTTP 관련 어노테이션 처리 (@Controller, @Get 등)
     annotationProcessor("io.micronaut:micronaut-http-validation")
+    // @Serdeable 처리 — 컴파일 타임에 직렬화/역직렬화 코드를 생성
     annotationProcessor("io.micronaut.serde:micronaut-serde-processor")
+    // Jackson Annotations facade — @JsonProperty 등 사용 가능.
+    // 실제 직렬화 로직은 micronaut-serde-processor가 컴파일 타임에 생성한 코드가 수행.
+    // jackson-databind(리플렉션 기반 ObjectMapper)는 포함되지 않는다.
     implementation("io.micronaut.serde:micronaut-serde-jackson")
     runtimeOnly("ch.qos.logback:logback-classic")
     testImplementation("io.micronaut:micronaut-http-client")
@@ -84,6 +89,8 @@ dependencies {
 ```
 
 `annotationProcessor`가 핵심입니다. 이 의존성들이 컴파일 시점에 실행되어 BeanDefinition 등의 클래스를 생성합니다. Spring Boot의 `spring-boot-starter`와 달리, 어떤 작업이 빌드 시 일어나는지 명시적으로 드러납니다.
+
+직렬화 방식도 다릅니다. Spring은 `jackson-databind`가 자동 구성되어 ObjectMapper가 런타임에 리플렉션으로 클래스를 탐색합니다. Micronaut은 `micronaut-serde-processor`가 빌드 시 직렬화/역직렬화 코드를 생성하고, 런타임에는 그 코드가 실행됩니다. `micronaut-serde-jackson`은 Jackson 자체가 아니라 `@JsonProperty` 등 Jackson Annotations를 코드 모델로 쓸 수 있게 해주는 facade입니다. DTO에 `@Serdeable`을 붙이면 컴파일 타임에 해당 클래스의 직렬화 구현체가 생성됩니다.
 
 **Lombok을 함께 사용할 경우 선언 순서에 주의해야 합니다.** Micronaut annotation processor는 소스 코드를 분석해 BeanDefinition을 생성하는데, Lombok이 `@Getter`·`@AllArgsConstructor` 등으로 생성한 메서드와 생성자를 그 대상으로 삼아야 하는 경우가 많습니다. Lombok processor가 먼저 실행되어 코드를 생성해두지 않으면, Micronaut processor가 생성자나 getter를 찾지 못해 빌드가 실패합니다.
 
@@ -102,6 +109,9 @@ dependencies {
     annotationProcessor("io.micronaut:micronaut-http-validation")
     annotationProcessor("io.micronaut.serde:micronaut-serde-processor")
 
+    // Jackson Annotations facade — @JsonProperty 등 사용 가능.
+    // 실제 직렬화 로직은 micronaut-serde-processor가 컴파일 타임에 생성한 코드가 수행.
+    // jackson-databind(리플렉션 기반 ObjectMapper)는 포함되지 않는다.
     implementation("io.micronaut.serde:micronaut-serde-jackson")
     runtimeOnly("ch.qos.logback:logback-classic")
     testImplementation("io.micronaut:micronaut-http-client")
