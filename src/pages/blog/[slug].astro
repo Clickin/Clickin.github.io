@@ -86,3 +86,108 @@ const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 
     pre.appendChild(btn);
   });
 </script>
+
+<script>
+  // ── Footnote popover ──────────────────────────────────────────────────────
+  (function () {
+    const refs = document.querySelectorAll("a[data-footnote-ref]");
+    if (!refs.length) return;
+
+    const popover = document.createElement("div");
+    popover.id = "fn-popover";
+    popover.setAttribute("role", "tooltip");
+    popover.setAttribute("aria-hidden", "true");
+    document.body.appendChild(popover);
+
+    let hideTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeTouchRef: Element | null = null;
+
+    function getFootnoteHTML(href: string): string | null {
+      const li = document.getElementById(href.slice(1));
+      if (!li) return null;
+      const clone = li.cloneNode(true) as Element;
+      clone.querySelectorAll("[data-footnote-backref]").forEach((el) => el.remove());
+      return (clone as HTMLElement).innerHTML.trim();
+    }
+
+    function show(anchor: Element) {
+      if (hideTimer) clearTimeout(hideTimer), (hideTimer = null);
+
+      const html = getFootnoteHTML(anchor.getAttribute("href") ?? "");
+      if (!html) return;
+
+      popover.innerHTML = html;
+      popover.style.maxWidth = Math.min(320, window.innerWidth - 24) + "px";
+      popover.style.top = "-9999px";
+      popover.style.left = "-9999px";
+      popover.setAttribute("aria-hidden", "false");
+
+      requestAnimationFrame(() => {
+        const r = anchor.getBoundingClientRect();
+        const ph = popover.offsetHeight;
+        const pw = popover.offsetWidth;
+        const gap = 8;
+
+        const topAbove = r.top - ph - gap;
+        const top = topAbove >= 8 ? topAbove : r.bottom + gap;
+        let left = r.left + r.width / 2 - pw / 2;
+        left = Math.max(12, Math.min(left, window.innerWidth - pw - 12));
+
+        popover.style.top = `${top}px`;
+        popover.style.left = `${left}px`;
+        popover.classList.add("fn-popover--open");
+      });
+    }
+
+    function hide() {
+      if (hideTimer) clearTimeout(hideTimer), (hideTimer = null);
+      popover.classList.remove("fn-popover--open");
+      popover.setAttribute("aria-hidden", "true");
+      activeTouchRef = null;
+    }
+
+    function scheduleHide() {
+      hideTimer = setTimeout(hide, 200);
+    }
+
+    refs.forEach((anchor) => {
+      const sup = anchor.parentElement!;
+
+      // Desktop: hover
+      sup.addEventListener("mouseenter", () => show(anchor));
+      sup.addEventListener("mouseleave", scheduleHide);
+
+      // Mobile: first touch shows popover, second touch navigates
+      sup.addEventListener(
+        "touchstart",
+        (e) => {
+          if (activeTouchRef === anchor) {
+            activeTouchRef = null;
+            hide();
+            return;
+          }
+          e.preventDefault();
+          activeTouchRef = anchor;
+          show(anchor);
+        },
+        { passive: false }
+      );
+    });
+
+    popover.addEventListener("mouseenter", () => {
+      if (hideTimer) clearTimeout(hideTimer), (hideTimer = null);
+    });
+    popover.addEventListener("mouseleave", scheduleHide);
+
+    // Tap outside to dismiss
+    document.addEventListener("touchstart", (e) => {
+      if (
+        activeTouchRef &&
+        !(e.target as Element).closest("a[data-footnote-ref]") &&
+        !popover.contains(e.target as Node)
+      ) {
+        hide();
+      }
+    });
+  })();
+</script>

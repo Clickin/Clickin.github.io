@@ -260,6 +260,48 @@
   article td {
     @apply px-3 py-2 border-b border-[var(--color-border)];
   }
+
+  /* ── Footnote popover ── */
+  #fn-popover {
+    position: fixed;
+    z-index: 9999;
+    max-width: 320px;
+    padding: 0.625rem 0.875rem;
+    background-color: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+    box-shadow:
+      0 4px 16px rgba(0, 0, 0, 0.12),
+      0 1px 4px rgba(0, 0, 0, 0.08);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  #fn-popover.fn-popover--open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  #fn-popover p {
+    margin: 0;
+  }
+
+  #fn-popover p + p {
+    margin-top: 0.375rem;
+  }
+
+  #fn-popover a {
+    font-size: inherit;
+  }
+
+  /* footnote ref: pointer cursor */
+  sup:has(a[data-footnote-ref]) {
+    cursor: pointer;
+  }
 }
 
 /* ─── Pagefind UI theme ─── */
