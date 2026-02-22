@@ -1,6 +1,7 @@
 import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
 import tailwindcss from "@tailwindcss/vite";
+import { transformerNotationDiff, transformerNotationHighlight } from "@shikijs/transformers";
 import { defineConfig } from "astro/config";
 import remarkRewritePostAssets from "./scripts/remark-rewrite-post-assets.mjs";
 
@@ -17,6 +18,15 @@ function ghPagesConfig() {
 export default defineConfig({
   site: "https://clickin.github.io",
   integrations: [mdx({ remarkPlugins: [remarkRewritePostAssets] }), sitemap()],
+  markdown: {
+    shikiConfig: {
+      themes: {
+        light: "github-light",
+        dark: "github-dark",
+      },
+      transformers: [transformerNotationDiff(), transformerNotationHighlight()],
+    },
+  },
   build: {
     inlineStylesheets: "auto",
   },
