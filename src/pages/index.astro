@@ -47,10 +47,18 @@ const base = import.meta.env.BASE_URL;
               {p.data.date.toISOString().slice(0, 10)}
             </time>
           </div>
-          <div class="flex items-center gap-2 mt-3">
+          <div class="flex items-center gap-2 mt-3 flex-wrap">
+            {p.data.series && (
+              <span class="text-xs px-2 py-0.5 rounded-full border border-[var(--color-accent)] text-[var(--color-accent)]">
+                {p.data.series}{p.data.order != null ? ` · ${p.data.order}편` : ""}
+              </span>
+            )}
             <span class="text-xs px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)]">
               {p.data.category}
             </span>
+            {p.data.tags.map((tag: string) => (
+              <span class="text-xs text-[var(--color-text-secondary)]">#{tag}</span>
+            ))}
           </div>
         </a>
       ))}
