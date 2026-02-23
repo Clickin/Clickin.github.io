@@ -18,8 +18,47 @@ const ogImage = `/og/blog/${normalizePostSlug(post.slug)}.png`;
 
 const dateStr = post.data.date.toISOString().slice(0, 10);
 const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 10) : null;
+
+const siteUrl = Astro.site?.href ?? "https://clickin.github.io/";
+const postUrl = new URL(`/blog/${normalizePostSlug(post.slug)}/`, siteUrl).href;
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": post.data.title,
+  "description": post.data.description,
+  "image": new URL(ogImage, siteUrl).href,
+  "datePublished": post.data.date.toISOString(),
+  "dateModified": post.data.updated?.toISOString() ?? post.data.date.toISOString(),
+  "author": {
+    "@type": "Person",
+    "name": "Clickin",
+    "url": siteUrl
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Clickin Devlog",
+    "logo": {
+      "@type": "ImageObject",
+      "url": new URL("/favicon.png", siteUrl).href
+    }
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": postUrl
+  }
+};
 ---
-<BaseLayout title={post.data.title} description={post.data.description} ogImage={ogImage} mainClass="max-w-7xl mx-auto px-4 sm:px-6">
+<BaseLayout 
+  title={post.data.title} 
+  description={post.data.description} 
+  ogImage={ogImage} 
+  mainClass="max-w-7xl mx-auto px-4 sm:px-6"
+  type="article"
+  publishDate={post.data.date}
+  updatedDate={post.data.updated}
+  structuredData={structuredData}
+>
   <!-- Mobile Category Navigation -->
   <div class="lg:hidden mb-4">
     <CategorySidebar activeCategoryPath={post.data.category.split(">").map(s => s.trim()).join("/")} />

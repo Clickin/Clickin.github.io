@@ -8,8 +8,25 @@ const posts = (await getCollection("posts", ({ data }) => !data.draft && data.pu
   .slice(0, 5);
 
 const base = import.meta.env.BASE_URL;
+const siteUrl = Astro.site?.href ?? "https://clickin.github.io/";
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Clickin Devlog",
+  "url": siteUrl,
+  "description": "Developer blog — notes, write-ups, and explorations.",
+  "author": {
+    "@type": "Person",
+    "name": "Clickin"
+  }
+};
 ---
-<BaseLayout title="Home" description="Developer blog — notes, write-ups, and explorations.">
+<BaseLayout 
+  title="Home" 
+  description="Developer blog — notes, write-ups, and explorations."
+  structuredData={structuredData}
+>
   <section class="py-8">
     <h1 class="text-4xl sm:text-5xl font-extrabold mb-4">
       Welcome 👋
