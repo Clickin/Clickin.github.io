@@ -2,6 +2,7 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { postUrl, normalizePostSlug } from "../lib/slug";
+import { site as siteCfg } from "../site.config";
 
 const posts = (await getCollection("posts", ({ data }) => !data.draft && data.publish !== false))
   .sort((a, b) => (b.data.updated ?? b.data.date).valueOf() - (a.data.updated ?? a.data.date).valueOf())
@@ -13,18 +14,18 @@ const siteUrl = Astro.site?.href ?? "https://clickin.github.io/";
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "WebSite",
-  "name": "Clickin Devlog",
+  "name": siteCfg.title,
   "url": siteUrl,
-  "description": "Developer blog — notes, write-ups, and explorations.",
+  "description": siteCfg.description,
   "author": {
     "@type": "Person",
-    "name": "Clickin"
+    "name": siteCfg.author
   }
 };
 ---
-<BaseLayout 
-  title="Home" 
-  description="Developer blog — notes, write-ups, and explorations."
+<BaseLayout
+  title="Home"
+  description={siteCfg.description}
   structuredData={structuredData}
 >
   <section class="py-8">

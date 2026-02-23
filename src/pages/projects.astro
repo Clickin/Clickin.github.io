@@ -1,5 +1,6 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
+import { site as siteCfg } from "../site.config";
 
 const base = import.meta.env.BASE_URL;
 
@@ -18,22 +19,24 @@ const projects = [
   },
 ];
 
-const schema = projects.map((project) => ({
+const structuredData = {
   "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: project.name,
-  description: project.description,
-  applicationCategory: "DeveloperApplication",
-  operatingSystem: "Any",
-  offers: {
-    "@type": "Offer",
-    price: "0",
-    priceCurrency: "USD",
-  },
-}));
+  "@graph": projects.map((project) => ({
+    "@type": "SoftwareApplication",
+    name: project.name,
+    description: project.description,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Any",
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+    },
+  })),
+};
 ---
 
-<BaseLayout title="Projects" description="My open source projects">
+<BaseLayout title="Projects" description="My open source projects" structuredData={structuredData}>
   <h1 class="text-3xl sm:text-4xl font-extrabold mb-8">Projects</h1>
 
   <div class="flex flex-col gap-4">
@@ -64,6 +67,4 @@ const schema = projects.map((project) => ({
       ))
     }
   </div>
-
-  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
 </BaseLayout>
