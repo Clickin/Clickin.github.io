@@ -78,6 +78,10 @@
   }
 
   /* ── Prose content ── */
+  article {
+    @apply min-w-0 w-full;
+  }
+
   article p {
     @apply my-4 leading-7 text-[var(--color-text-secondary)];
   }

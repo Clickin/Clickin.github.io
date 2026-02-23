@@ -22,6 +22,7 @@ const pagefindPath = `${base}pagefind/`;
           bundlePath: pagefindPath,
           showSubResults: true,
           showImages: false,
+          showFilters: ["category", "tag"],
           translations: {
             placeholder: "검색어를 입력하세요...",
             zero_results: "[SEARCH_TERM]에 대한 검색 결과가 없습니다.",
@@ -30,6 +31,7 @@ const pagefindPath = `${base}pagefind/`;
             alt_search:
               "[SEARCH_TERM] 대신 [DIFFERENT_TERM] 검색 결과를 보여드립니다.",
             search_suggestion: "다른 검색어로 시도해 보세요.",
+            filters_label: "필터",
           },
         });
 

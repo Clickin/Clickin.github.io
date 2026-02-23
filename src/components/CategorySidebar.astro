@@ -1,0 +1,152 @@
+---
+import { getCollection } from "astro:content";
+
+interface Props {
+  activeCategoryPath?: string; // e.g. "Java/Spring"
+}
+
+const { activeCategoryPath } = Astro.props;
+
+const allPosts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+
+// Build Tree Structure
+interface CategoryNode {
+  name: string;
+  fullPath: string;
+  count: number;
+  children: Record<string, CategoryNode>;
+}
+
+const tree: Record<string, CategoryNode> = {};
+
+allPosts.forEach(post => {
+  const parts = post.data.category.split(">").map(s => s.trim());
+  let currentLevel = tree;
+  let currentPath = "";
+
+  parts.forEach((part, index) => {
+    currentPath = index === 0 ? part : `${currentPath}/${part}`;
+    if (!currentLevel[part]) {
+      currentLevel[part] = {
+        name: part,
+        fullPath: currentPath,
+        count: 0,
+        children: {}
+      };
+    }
+    currentLevel[part].count++;
+    currentLevel = currentLevel[part].children;
+  });
+});
+
+const sortedRootCategories = Object.values(tree).sort((a, b) => a.name.localeCompare(b.name));
+const totalPosts = allPosts.length;
+---
+
+<div class="category-sidebar">
+  <!-- Mobile Carousel (Shown only on small screens) -->
+  <div class="lg:hidden mb-8">
+    <div class="flex overflow-x-auto pb-4 gap-2 no-scrollbar scroll-smooth">
+      <a
+        href="/blog"
+        class={`whitespace-nowrap px-4 py-1.5 rounded-full border text-sm transition-colors ${
+          !activeCategoryPath
+            ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white"
+            : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
+        }`}
+      >
+        All ({totalPosts})
+      </a>
+      {sortedRootCategories.map(cat => (
+        <a
+          href={`/blog/category/${cat.fullPath}`}
+          class={`whitespace-nowrap px-4 py-1.5 rounded-full border text-sm transition-colors ${
+            activeCategoryPath === cat.fullPath || activeCategoryPath?.startsWith(`${cat.fullPath}/`)
+              ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white"
+              : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
+          }`}
+        >
+          {cat.name} ({cat.count})
+        </a>
+      ))}
+    </div>
+  </div>
+
+  <!-- Desktop Sidebar -->
+  <nav class="hidden lg:flex flex-col gap-1">
+    <h2 class="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-4 px-3">Categories</h2>
+    <ul class="space-y-1">
+      <li>
+        <a
+          href="/blog"
+          class={`flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors duration-200 no-underline ${
+            !activeCategoryPath
+              ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold"
+              : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          <span>All Posts</span>
+          <span class="text-xs opacity-60">{totalPosts}</span>
+        </a>
+      </li>
+      {
+        sortedRootCategories.map((cat) => {
+          const hasChildren = Object.keys(cat.children).length > 0;
+          const isActive = activeCategoryPath === cat.fullPath;
+          const isParentOfActive = activeCategoryPath?.startsWith(`${cat.fullPath}/`);
+          const isOpen = isActive || isParentOfActive;
+
+          return (
+            <li class="category-item">
+              <div class="flex items-center">
+                <a
+                  href={`/blog/category/${cat.fullPath}`}
+                  class={`flex-1 flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors duration-200 no-underline ${
+                    isActive
+                      ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold"
+                      : isParentOfActive 
+                        ? "text-[var(--color-accent)] font-medium"
+                        : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  <span class="capitalize">{cat.name}</span>
+                  <span class="text-xs opacity-60">{cat.count}</span>
+                </a>
+              </div>
+              
+              {hasChildren && (
+                <ul class={`ml-4 mt-1 space-y-1 border-l border-[var(--color-border)] ${isOpen ? 'block' : 'hidden'}`}>
+                  {Object.values(cat.children).sort((a, b) => a.name.localeCompare(b.name)).map(child => (
+                    <li>
+                      <a
+                        href={`/blog/category/${child.fullPath}`}
+                        class={`flex items-center justify-between pl-4 pr-3 py-1.5 rounded-r-lg text-xs transition-colors duration-200 no-underline ${
+                          activeCategoryPath === child.fullPath
+                            ? "text-[var(--color-accent)] font-semibold border-l-2 border-[var(--color-accent)] -ml-[1px]"
+                            : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-secondary)]"
+                        }`}
+                      >
+                        <span class="capitalize">{child.name}</span>
+                        <span class="text-xs opacity-60">{child.count}</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })
+      }
+    </ul>
+  </nav>
+</div>
+
+<style>
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+</style>

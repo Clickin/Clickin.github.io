@@ -5,6 +5,7 @@ import { normalizePostSlug } from "../../lib/slug";
 import Giscus from "../../components/Giscus.astro";
 import TableOfContents from "../../components/TableOfContents.astro";
 import Series from "../../components/Series.astro";
+import CategorySidebar from "../../components/CategorySidebar.astro";
 
 export async function getStaticPaths() {
   const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
@@ -18,27 +19,45 @@ const ogImage = `/og/blog/${normalizePostSlug(post.slug)}.png`;
 const dateStr = post.data.date.toISOString().slice(0, 10);
 const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 10) : null;
 ---
-<BaseLayout title={post.data.title} description={post.data.description} ogImage={ogImage} mainClass="max-w-6xl mx-auto px-4 sm:px-6">
-  <div class="relative flex gap-8">
-    <article class="py-4 flex-1 min-w-0">
-      <header class="mb-8">
-        <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
-        <div class="flex flex-wrap items-center gap-3 text-sm text-[var(--color-text-secondary)]">
-          <time datetime={post.data.date.toISOString()}>{dateStr}</time>
-          {updatedStr && (
-            <span class="text-[var(--color-text-secondary)]">
-              (updated {updatedStr})
-            </span>
-          )}
-          <span>·</span>
-          <span class="px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)] text-xs font-medium">
-            {post.data.category}
-          </span>
-        </div>
+<BaseLayout title={post.data.title} description={post.data.description} ogImage={ogImage} mainClass="max-w-7xl mx-auto px-4 sm:px-6">
+  <div class="flex flex-col lg:flex-row gap-8 lg:gap-12 min-w-0">
+    <!-- Left Sidebar: Categories (Hidden on mobile/tablet, shown on desktop) -->
+    <aside class="hidden lg:block w-48 flex-shrink-0 sticky top-20 self-start">
+      <CategorySidebar activeCategoryPath={post.data.category.split(">").map(s => s.trim()).join("/")} />
+    </aside>
+
+    <div class="flex-1 min-w-0 flex flex-col xl:flex-row gap-8 xl:gap-12">
+      <article class="py-4 flex-1 min-w-0 w-full overflow-hidden break-words">
+        <header class="mb-8">
+
+              <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
+              <div class="flex flex-wrap items-center gap-3 text-sm text-[var(--color-text-secondary)]">
+                <time datetime={post.data.date.toISOString()}>{dateStr}</time>
+                {updatedStr && (
+                  <span class="text-[var(--color-text-secondary)]">
+                    (updated {updatedStr})
+                  </span>
+                )}
+                <span>·</span>
+                <a 
+                  href={`/blog/category/${post.data.category.split(">").map(s => s.trim()).join("/")}`}
+                  data-pagefind-filter="category"
+                  class="px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)] text-xs font-medium no-underline hover:opacity-80 transition-opacity"
+                >
+                  {post.data.category}
+                </a>
+              </div>
+    
         {post.data.tags.length > 0 && (
           <div class="flex flex-wrap gap-2 mt-3">
             {post.data.tags.map((tag: string) => (
-              <span class="text-xs text-[var(--color-text-secondary)]">#{tag}</span>
+              <a 
+                href={`/blog/tag/${tag}`}
+                data-pagefind-filter="tag"
+                class="text-xs text-[var(--color-text-secondary)] no-underline hover:text-[var(--color-accent)] transition-colors"
+              >
+                #{tag}
+              </a>
             ))}
           </div>
         )}
@@ -52,7 +71,7 @@ const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 
       <Giscus />
     </article>
 
-    <aside class="hidden xl:block w-64 flex-shrink-0">
+    <aside class="hidden xl:block w-64 flex-shrink-0 sticky top-20 self-start">
       <TableOfContents headings={headings} />
     </aside>
   </div>

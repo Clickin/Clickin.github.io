@@ -1,0 +1,46 @@
+---
+import BaseLayout from "../../../layouts/BaseLayout.astro";
+import { getCollection } from "astro:content";
+import PostPreview from "../../../components/PostPreview.astro";
+import CategorySidebar from "../../../components/CategorySidebar.astro";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+  const tags = [...new Set(posts.flatMap((post) => post.data.tags))];
+
+  return tags.map((tag) => ({
+    params: { tag },
+    props: {
+      tag,
+      posts: posts
+        .filter((post) => post.data.tags.includes(tag))
+        .sort((a, b) => {
+          const dateDiff = (b.data.updated ?? b.data.date).valueOf() - (a.data.updated ?? a.data.date).valueOf();
+          if (dateDiff !== 0) return dateDiff;
+          return (b.data.order ?? 0) - (a.data.order ?? 0);
+        }),
+    },
+  }));
+}
+
+const { tag, posts } = Astro.props;
+---
+
+<BaseLayout title={`Tag: #${tag}`} description={`Posts tagged with #${tag}`} mainClass="max-w-5xl mx-auto px-4 sm:px-6">
+  <div class="mb-8">
+    <h1 class="text-3xl sm:text-4xl font-extrabold mb-2">#{tag}</h1>
+    <p class="text-[var(--color-text-secondary)]">{posts.length} posts found</p>
+  </div>
+
+  <div class="flex flex-col lg:flex-row gap-8 lg:gap-12">
+    <aside class="w-full lg:w-48 flex-shrink-0 lg:sticky lg:top-20 lg:self-start">
+      <CategorySidebar />
+    </aside>
+    
+    <div class="flex-1 min-w-0 flex flex-col gap-4">
+      {posts.map((p) => (
+        <PostPreview post={p} />
+      ))}
+    </div>
+  </div>
+</BaseLayout>

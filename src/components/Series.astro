@@ -44,21 +44,20 @@ const seriesPosts = posts
         <polyline points="6 9 12 15 18 9" />
       </svg>
     </summary>
-    <ol class="space-y-2 px-4 pb-4 pt-1" type="1">
+    <ol class="space-y-2 px-8 pb-4 pt-1 list-decimal text-sm text-[var(--color-text-secondary)]">
       {seriesPosts.map((post) => {
         const isCurrent = post.slug === currentSlug;
         return (
-          <li class="flex items-start gap-2">
-            <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--color-text-secondary)] flex-shrink-0 opacity-50" />
+          <li>
             {isCurrent ? (
-              <span class="text-sm font-medium text-[var(--color-accent)]">
+              <span class="font-medium text-[var(--color-accent)]">
                 {post.data.title}
                 <span class="ml-2 text-xs text-[var(--color-text-secondary)] font-normal">(현재)</span>
               </span>
             ) : (
               <a
                 href={`/blog/${post.slug}`}
-                class="text-sm text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
+                class="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
               >
                 {post.data.title}
               </a>
