@@ -41,6 +41,17 @@ allPosts.forEach(post => {
 
 const sortedRootCategories = Object.values(tree).sort((a, b) => a.name.localeCompare(b.name));
 const totalPosts = allPosts.length;
+
+// Flatten tree for mobile carousel to show all categories
+const flattenedCategories: { name: string; fullPath: string; count: number; depth: number }[] = [];
+function flatten(node: CategoryNode, depth: number, parentName: string = "") {
+  const displayName = parentName ? `${parentName} > ${node.name}` : node.name;
+  flattenedCategories.push({ name: displayName, fullPath: node.fullPath, count: node.count, depth });
+  Object.values(node.children)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach(child => flatten(child, depth + 1, displayName));
+}
+sortedRootCategories.forEach(cat => flatten(cat, 0));
 ---
 
 <div class="category-sidebar">
@@ -57,13 +68,15 @@ const totalPosts = allPosts.length;
       >
         All ({totalPosts})
       </a>
-      {sortedRootCategories.map(cat => (
+      {flattenedCategories.map(cat => (
         <a
           href={`/blog/category/${cat.fullPath}`}
           class={`whitespace-nowrap px-4 py-1.5 rounded-full border text-sm transition-colors ${
-            activeCategoryPath === cat.fullPath || activeCategoryPath?.startsWith(`${cat.fullPath}/`)
+            activeCategoryPath === cat.fullPath
               ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white"
-              : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
+              : activeCategoryPath?.startsWith(`${cat.fullPath}/`)
+                ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent)]/5"
+                : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
           }`}
         >
           {cat.name} ({cat.count})

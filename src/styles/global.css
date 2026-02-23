@@ -43,6 +43,7 @@
 
   body {
     @apply bg-[var(--color-bg)] text-[var(--color-text)] font-sans antialiased;
+    max-width: 100%;
     transition:
       background-color 0.2s ease,
       color 0.2s ease;
@@ -113,6 +114,10 @@
 
   article img {
     @apply rounded-lg my-6 max-w-full;
+  }
+
+  article iframe {
+    @apply max-w-full;
   }
 
   /* ── Code ── */
@@ -254,7 +259,7 @@
 
   /* ── Table ── */
   article table {
-    @apply w-full my-6 text-sm border-collapse;
+    @apply w-full my-6 text-sm border-collapse block overflow-x-auto;
   }
 
   article th {
