@@ -57,7 +57,7 @@ sortedRootCategories.forEach(cat => flatten(cat, 0));
 <div class="category-sidebar">
   <!-- Mobile Carousel (Shown only on small screens) -->
   <div class="lg:hidden mb-8">
-    <div class="flex overflow-x-auto pb-4 gap-2 no-scrollbar scroll-smooth">
+    <div class="flex overflow-x-auto pb-4 gap-2 no-scrollbar scroll-smooth overscroll-x-contain">
       <a
         href="/blog"
         class={`whitespace-nowrap px-4 py-1.5 rounded-full border text-sm transition-colors ${

@@ -2,6 +2,7 @@
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { normalizePostSlug } from "../../lib/slug";
+import { site as siteCfg } from "../../site.config";
 import Giscus from "../../components/Giscus.astro";
 import TableOfContents from "../../components/TableOfContents.astro";
 import Series from "../../components/Series.astro";
@@ -26,18 +27,19 @@ const structuredData = {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
   "headline": post.data.title,
-  "description": post.data.description,
+  "url": postUrl,
+  "description": post.data.description ?? siteCfg.description,
   "image": new URL(ogImage, siteUrl).href,
   "datePublished": post.data.date.toISOString(),
   "dateModified": post.data.updated?.toISOString() ?? post.data.date.toISOString(),
   "author": {
     "@type": "Person",
-    "name": "Clickin",
+    "name": siteCfg.author,
     "url": siteUrl
   },
   "publisher": {
     "@type": "Organization",
-    "name": "Clickin Devlog",
+    "name": siteCfg.title,
     "logo": {
       "@type": "ImageObject",
       "url": new URL("/favicon.png", siteUrl).href
@@ -71,7 +73,7 @@ const structuredData = {
     </aside>
 
     <div class="flex-1 min-w-0 flex flex-col xl:flex-row gap-8 xl:gap-12">
-      <article class="py-4 flex-1 min-w-0 w-full overflow-hidden break-words">
+      <article class="py-4 flex-1 min-w-0 w-full break-words">
         <header class="mb-8">
 
               <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
