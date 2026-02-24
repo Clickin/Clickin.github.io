@@ -354,3 +354,21 @@
     @apply max-w-3xl mx-auto px-4 sm:px-6 w-full;
   }
 }
+
+/* ── Wide-screen layout: category sidebar floats in left page margin ───── */
+@media (min-width: 1800px) {
+  .cat-sidebar {
+    position: fixed;
+    top: 5rem; /* matches sticky top-20 */
+    left: max(1rem, calc(50vw - 640px - 192px - 2rem));
+    width: 12rem; /* w-48 */
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+  }
+
+  /* Sidebar leaves flex flow when fixed — shift content left by 80px vs
+     original sidebar+gap (240px→160px) to expand article from 688px to 768px. */
+  .cat-sidebar + div {
+    margin-left: 10rem; /* 160px: gives article 768px width (1232−160−48−256) */
+  }
+}

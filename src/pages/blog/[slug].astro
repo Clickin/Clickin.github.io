@@ -68,7 +68,7 @@ const structuredData = {
 
   <div class="flex flex-col lg:flex-row gap-8 lg:gap-12 min-w-0">
     <!-- Left Sidebar: Categories (Hidden on mobile/tablet, shown on desktop) -->
-    <aside class="hidden lg:block w-48 flex-shrink-0 sticky top-20 self-start">
+    <aside class="cat-sidebar hidden lg:block w-48 flex-shrink-0 sticky top-20 self-start">
       <CategorySidebar activeCategoryPath={post.data.category.split(">").map(s => s.trim()).join("/")} />
     </aside>
 
