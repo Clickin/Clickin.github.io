@@ -308,6 +308,7 @@
 
   #fn-popover a {
     font-size: inherit;
+    overflow-wrap: anywhere;
   }
 
   /* footnote ref: pointer cursor */
