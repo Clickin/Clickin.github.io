@@ -2,6 +2,7 @@ import { getCollection } from "astro:content";
 import { OGImageRoute } from "astro-og-canvas";
 import { site } from "../../site.config";
 import { normalizePostSlug } from "../../lib/slug";
+import { isPostVisible } from "../../lib/postVisibility";
 
 type OgPage = {
   title: string;
@@ -109,7 +110,7 @@ const staticPages: Record<string, OgPage> = {
   },
 };
 
-const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
 const postPages = Object.fromEntries(
   posts.map(({ slug, data, body }) => [
     `blog/${normalizePostSlug(slug)}`,

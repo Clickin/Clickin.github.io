@@ -2,8 +2,9 @@ import rss from "@astrojs/rss";
 import { getCollection } from "astro:content";
 import { site as siteCfg } from "../site.config";
 import { normalizePostSlug } from "../lib/slug";
+import { isPostVisible } from "../lib/postVisibility";
 export async function GET(context){
-  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+  const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
   return rss({
     title: siteCfg.title,
     description: siteCfg.description,

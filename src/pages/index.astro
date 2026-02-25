@@ -2,9 +2,10 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { postUrl, normalizePostSlug } from "../lib/slug";
+import { isPostVisible } from "../lib/postVisibility";
 import { site as siteCfg } from "../site.config";
 
-const posts = (await getCollection("posts", ({ data }) => !data.draft && data.publish !== false))
+const posts = (await getCollection("posts", ({ data }) => isPostVisible(data)))
   .sort((a, b) => (b.data.updated ?? b.data.date).valueOf() - (a.data.updated ?? a.data.date).valueOf())
   .slice(0, 5);
 

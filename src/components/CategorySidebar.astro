@@ -1,5 +1,6 @@
 ---
 import { getCollection } from "astro:content";
+import { isPostVisible } from "../lib/postVisibility";
 
 interface Props {
   activeCategoryPath?: string; // e.g. "Java/Spring"
@@ -7,7 +8,7 @@ interface Props {
 
 const { activeCategoryPath } = Astro.props;
 
-const allPosts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+const allPosts = await getCollection("posts", ({ data }) => isPostVisible(data));
 
 // Build Tree Structure
 interface CategoryNode {
@@ -49,9 +50,13 @@ function flatten(node: CategoryNode, depth: number, parentName: string = "") {
   flattenedCategories.push({ name: displayName, fullPath: node.fullPath, count: node.count, depth });
   Object.values(node.children)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .forEach(child => flatten(child, depth + 1, displayName));
+    .forEach((child) => {
+      flatten(child, depth + 1, displayName);
+    });
 }
-sortedRootCategories.forEach(cat => flatten(cat, 0));
+sortedRootCategories.forEach((cat) => {
+  flatten(cat, 0);
+});
 ---
 
 <div class="category-sidebar">

@@ -2,6 +2,7 @@
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import { normalizePostSlug } from "../../lib/slug";
+import { isPostVisible } from "../../lib/postVisibility";
 import { site as siteCfg } from "../../site.config";
 import Giscus from "../../components/Giscus.astro";
 import TableOfContents from "../../components/TableOfContents.astro";
@@ -9,7 +10,7 @@ import Series from "../../components/Series.astro";
 import CategorySidebar from "../../components/CategorySidebar.astro";
 
 export async function getStaticPaths() {
-  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+  const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
   return posts.map((p) => ({ params: { slug: normalizePostSlug(p.slug) }, props: { post: p } }));
 }
 const { post } = Astro.props;

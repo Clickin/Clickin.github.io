@@ -1,5 +1,6 @@
 ---
 import { getCollection } from "astro:content";
+import { isPostVisible } from "../lib/postVisibility";
 
 interface Props {
   series: string;
@@ -8,7 +9,7 @@ interface Props {
 
 const { series, currentSlug } = Astro.props;
 
-const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
 const seriesPosts = posts
   .filter((post) => post.data.series === series)
   .sort((a, b) => {

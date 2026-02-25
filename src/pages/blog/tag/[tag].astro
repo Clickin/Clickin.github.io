@@ -3,9 +3,10 @@ import BaseLayout from "../../../layouts/BaseLayout.astro";
 import { getCollection } from "astro:content";
 import PostPreview from "../../../components/PostPreview.astro";
 import CategorySidebar from "../../../components/CategorySidebar.astro";
+import { isPostVisible } from "../../../lib/postVisibility";
 
 export async function getStaticPaths() {
-  const posts = await getCollection("posts", ({ data }) => !data.draft && data.publish !== false);
+  const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
   const tags = [...new Set(posts.flatMap((post) => post.data.tags))];
 
   return tags.map((tag) => ({
