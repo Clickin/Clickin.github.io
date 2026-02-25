@@ -1,0 +1,9 @@
+target/
+.project
+.classpath
+.factorypath
+.settings/
+bin/
+results/
+dependency-reduced-pom.xml
+.mvn/wrapper/maven-wrapper.jar
