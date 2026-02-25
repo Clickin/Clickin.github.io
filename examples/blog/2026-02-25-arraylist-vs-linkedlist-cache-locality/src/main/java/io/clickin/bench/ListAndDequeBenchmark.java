@@ -35,6 +35,9 @@ public class ListAndDequeBenchmark {
     public ArrayList<Integer> arrayList;
     public LinkedList<Integer> linkedList;
     public int middleIndex;
+    public int firstValue;
+    public int middleValue;
+    public int lastValue;
 
     @Setup(Level.Trial)
     public void setUp() {
@@ -45,6 +48,9 @@ public class ListAndDequeBenchmark {
         linkedList.add(i);
       }
       middleIndex = size / 2;
+      firstValue = 0;
+      middleValue = middleIndex;
+      lastValue = size - 1;
     }
   }
 
@@ -100,6 +106,52 @@ public class ListAndDequeBenchmark {
   @Benchmark
   public int linkedListGetMiddle(ReadState state) {
     return state.linkedList.get(state.middleIndex);
+  }
+
+  @State(Scope.Thread)
+  public static class BuildState {
+    @Param({"1024", "8192", "65536"})
+    public int size;
+
+    public Object[] payload;
+
+    @Setup(Level.Trial)
+    public void setUp() {
+      payload = new Object[size];
+      for (int i = 0; i < size; i++) {
+        payload[i] = new Object();
+      }
+    }
+  }
+
+  @Benchmark
+  public int arrayListFindByValueFirst(ReadState state) {
+    return findIndexByValue(state.arrayList, state.firstValue);
+  }
+
+  @Benchmark
+  public int linkedListFindByValueFirst(ReadState state) {
+    return findIndexByValue(state.linkedList, state.firstValue);
+  }
+
+  @Benchmark
+  public int arrayListFindByValueMiddle(ReadState state) {
+    return findIndexByValue(state.arrayList, state.middleValue);
+  }
+
+  @Benchmark
+  public int linkedListFindByValueMiddle(ReadState state) {
+    return findIndexByValue(state.linkedList, state.middleValue);
+  }
+
+  @Benchmark
+  public int arrayListFindByValueLast(ReadState state) {
+    return findIndexByValue(state.arrayList, state.lastValue);
+  }
+
+  @Benchmark
+  public int linkedListFindByValueLast(ReadState state) {
+    return findIndexByValue(state.linkedList, state.lastValue);
   }
 
   @Benchmark
@@ -198,5 +250,34 @@ public class ListAndDequeBenchmark {
   public int linkedListDequeOfferFirstPollLast(DequeState state) {
     state.linkedDeque.addFirst(state.nextValue++);
     return state.linkedDeque.pollLast();
+  }
+
+  @Benchmark
+  public int arrayListBuildFromPayload(BuildState state) {
+    ArrayList<Object> list = new ArrayList<>(state.size);
+    for (Object value : state.payload) {
+      list.add(value);
+    }
+    return list.size();
+  }
+
+  @Benchmark
+  public int linkedListBuildFromPayload(BuildState state) {
+    LinkedList<Object> list = new LinkedList<>();
+    for (Object value : state.payload) {
+      list.add(value);
+    }
+    return list.size();
+  }
+
+  private static int findIndexByValue(List<Integer> list, int target) {
+    int index = 0;
+    for (int value : list) {
+      if (value == target) {
+        return index;
+      }
+      index++;
+    }
+    return -1;
   }
 }
