@@ -1,0 +1,13 @@
+dontinline,*.*_all_jmhStub
+dontinline,*.*_avgt_jmhStub
+dontinline,*.*_sample_jmhStub
+dontinline,*.*_ss_jmhStub
+dontinline,*.*_thrpt_jmhStub
+inline,io/clickin/bench/ListAndDequeBenchmark$DequeState.setUp
+inline,io/clickin/bench/ListAndDequeBenchmark$ListState.setUp
+inline,io/clickin/bench/ListAndDequeBenchmark.arrayDequeOfferPoll
+inline,io/clickin/bench/ListAndDequeBenchmark.arrayListGetMiddle
+inline,io/clickin/bench/ListAndDequeBenchmark.arrayListIterate
+inline,io/clickin/bench/ListAndDequeBenchmark.linkedListDequeOfferPoll
+inline,io/clickin/bench/ListAndDequeBenchmark.linkedListGetMiddle
+inline,io/clickin/bench/ListAndDequeBenchmark.linkedListIterate
