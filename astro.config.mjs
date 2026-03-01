@@ -17,7 +17,12 @@ function ghPagesConfig() {
 
 export default defineConfig({
   site: "https://clickin.github.io",
-  integrations: [mdx({ remarkPlugins: [remarkRewritePostAssets] }), sitemap()],
+  integrations: [
+    mdx({ remarkPlugins: [remarkRewritePostAssets] }),
+    sitemap({
+      filter: (page) => !page.includes("/blog/tag/"),
+    }),
+  ],
   markdown: {
     shikiConfig: {
       themes: {
