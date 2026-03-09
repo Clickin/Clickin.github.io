@@ -53,6 +53,29 @@ src/content/posts/YYYY-MM-DD-slug/
 └── image.png    # Co-located assets (optional)
 ```
 
+
+## Mermaid Diagram (MDX Component)
+
+다이어그램을 이미지 파일 대신 코드로 관리하려면 MDX에서 `Mermaid` 컴포넌트를 import해서 사용하세요.
+
+```mdx
+---
+title: "diagram post"
+---
+
+import Mermaid from "../../../components/Mermaid.astro";
+
+<Mermaid
+  chart={`
+flowchart TD
+  A[Write Mermaid code in MDX] --> B[Build Astro]
+  B --> C[Diagram renders in post]
+`}
+/>
+```
+
+> `mermaid`는 npm dependency로 관리되며, Astro 번들 단계에서 처리됩니다.
+
 ## License
 
 MIT
