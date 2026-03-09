@@ -1,0 +1,79 @@
+---
+interface Props {
+  chart: string;
+  class?: string;
+}
+
+const { chart, class: className = "" } = Astro.props;
+---
+
+<div class={`mermaid-diagram ${className}`.trim()} data-mermaid-root>
+  <pre class="mermaid" data-mermaid-source={chart}>{chart}</pre>
+</div>
+
+<script type="module">
+  import mermaid from "mermaid";
+
+  const getTheme = () => (document.documentElement.classList.contains("dark") ? "dark" : "default");
+  let initializedTheme = "";
+
+  const ensureInitialized = () => {
+    const theme = getTheme();
+    if (initializedTheme === theme) return;
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme,
+    });
+    initializedTheme = theme;
+  };
+
+  const resetRenderedCharts = () => {
+    const rendered = document.querySelectorAll("[data-mermaid-root][data-mermaid-rendered] .mermaid");
+    rendered.forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const source = node.dataset.mermaidSource;
+      if (!source) return;
+      node.removeAttribute("data-processed");
+      node.innerHTML = source;
+    });
+    document
+      .querySelectorAll("[data-mermaid-root][data-mermaid-rendered]")
+      .forEach((container) => container.removeAttribute("data-mermaid-rendered"));
+  };
+
+  const renderMermaid = async () => {
+    ensureInitialized();
+    const containers = document.querySelectorAll("[data-mermaid-root]:not([data-mermaid-rendered])");
+    if (!containers.length) return;
+
+    const nodes = [];
+    containers.forEach((container) => {
+      const target = container.querySelector(".mermaid");
+      if (target instanceof Element) nodes.push(target);
+    });
+
+    if (!nodes.length) return;
+    await mermaid.run({ nodes });
+    containers.forEach((container) => container.setAttribute("data-mermaid-rendered", "true"));
+  };
+
+  renderMermaid();
+
+  let themeObserverQueued = false;
+  const observer = new MutationObserver(() => {
+    if (themeObserverQueued) return;
+    themeObserverQueued = true;
+    requestAnimationFrame(() => {
+      themeObserverQueued = false;
+      if (initializedTheme === getTheme()) return;
+      resetRenderedCharts();
+      renderMermaid();
+    });
+  });
+
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["class"],
+  });
+</script>
