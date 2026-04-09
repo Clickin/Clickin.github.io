@@ -24,25 +24,14 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - uses: actions/configure-pages@v5
-      - name: Diagnose Puppeteer runtime
-        run: |
-          set -eux
-          PUPPETEER_BIN="$(node --input-type=module -e "import puppeteer from 'puppeteer'; console.log(puppeteer.executablePath())")"
-          echo "PUPPETEER_BIN=$PUPPETEER_BIN"
-          uname -a
-          ldd --version || true
-          if command -v google-chrome >/dev/null 2>&1; then google-chrome --version; fi
-          if command -v chromium >/dev/null 2>&1; then chromium --version; fi
-          if command -v chromium-browser >/dev/null 2>&1; then chromium-browser --version; fi
-          if [ -x "$PUPPETEER_BIN" ]; then ldd "$PUPPETEER_BIN" || true; fi
-          npx puppeteer browsers list || true
+      - name: Install Puppeteer browser
+        run: pnpm exec puppeteer browsers install chrome
       - name: Build
         env:
           GITHUB_PAGES: "true"
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           PUBLIC_GA_MEASUREMENT_ID: ${{ vars.PUBLIC_GA_MEASUREMENT_ID || secrets.PUBLIC_GA_MEASUREMENT_ID }}
-          DEBUG: "puppeteer:*"
         run: pnpm build
       - name: Index with Pagefind (CJK support)
         run: npx -y pagefind --site dist
