@@ -7,5 +7,7 @@ dist
 public/posts/
 .claude/
 .sisyphus/
+.omx/
+.playwright-mcp/
 nul
 misc/
