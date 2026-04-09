@@ -35,7 +35,7 @@ const { post: p } = Astro.props;
       </span>
     )}
     <a 
-      href={`/blog/category/${p.data.category.split(">").map(s => s.trim()).join("/")}`}
+      href={`/blog/category/${p.data.category.split(">").map((s: string) => s.trim()).join("/")}`}
       class="text-xs px-2 py-0.5 rounded-full bg-[var(--color-tag-bg)] text-[var(--color-tag-text)] no-underline hover:opacity-80 transition-opacity"
     >
       {p.data.category}

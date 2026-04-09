@@ -28,6 +28,14 @@ pnpm dev
 
 Open [http://localhost:4321](http://localhost:4321).
 
+## Package Manager
+
+This repository uses `pnpm` only.
+
+- Use `pnpm install`, `pnpm add`, `pnpm remove`, and other `pnpm` commands for dependency changes.
+- Commit `pnpm-lock.yaml` whenever dependencies change.
+- Do not run `bun install` in this repo or commit `bun.lock`; deployment uses `pnpm install --frozen-lockfile`.
+
 ## Deploy to GitHub Pages
 
 1. Push to `main` branch
@@ -52,6 +60,20 @@ src/content/posts/YYYY-MM-DD-slug/
 ├── index.mdx    # Post content
 └── image.png    # Co-located assets (optional)
 ```
+
+## Mermaid Diagram
+
+Mermaid diagrams are rendered to static SVG during the build. Use a normal fenced code block with the `mermaid` language tag.
+
+````mdx
+```mermaid
+flowchart TD
+  A[Write Mermaid code in MDX] --> B[Astro build renders SVG]
+  B --> C[No Mermaid runtime shipped to the browser]
+```
+````
+
+The site renders light and dark SVG variants at build time and toggles them with CSS, so no Mermaid client bundle is needed.
 
 ## License
 

@@ -5,10 +5,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+pnpm install      # Install dependencies and update pnpm-lock.yaml
 pnpm dev          # Start dev server at http://localhost:4321
 pnpm build        # prebuild (copy assets) → astro build → pagefind index
 pnpm preview      # Preview production build locally
 ```
+
+## Package manager
+
+This repository uses `pnpm` only.
+
+- Use `pnpm install`, `pnpm add`, `pnpm remove`, and related `pnpm` commands for dependency changes.
+- Commit `pnpm-lock.yaml` whenever dependencies change.
+- Do not run `bun install` in this repo or commit `bun.lock`; GitHub Actions installs with `pnpm install --frozen-lockfile`.
 
 **Search requires a prior build.** In dev mode, `/pagefind/` requests are proxied to `dist/` by a custom Vite middleware — run `pnpm build` at least once before testing search in dev.
 

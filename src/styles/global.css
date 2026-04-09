@@ -122,6 +122,29 @@
     @apply max-w-full;
   }
 
+  article .mermaid-static {
+    @apply my-6 overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-code)] p-4;
+  }
+
+  article .mermaid-static__diagram--dark {
+    display: none;
+  }
+
+  .dark article .mermaid-static__diagram--light {
+    display: none;
+  }
+
+  .dark article .mermaid-static__diagram--dark {
+    display: block;
+  }
+
+  article .mermaid-static svg {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin-inline: auto;
+  }
+
   /* ── Code ── */
   code {
     @apply font-mono text-sm bg-[var(--color-bg-code)] px-1.5 py-0.5 rounded;

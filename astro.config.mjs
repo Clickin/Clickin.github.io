@@ -3,6 +3,7 @@ import sitemap from "@astrojs/sitemap";
 import tailwindcss from "@tailwindcss/vite";
 import { transformerNotationDiff, transformerNotationHighlight } from "@shikijs/transformers";
 import { defineConfig } from "astro/config";
+import remarkRenderMermaid from "./scripts/remark-render-mermaid.mjs";
 import remarkRewritePostAssets from "./scripts/remark-rewrite-post-assets.mjs";
 
 function ghPagesConfig() {
@@ -18,7 +19,7 @@ function ghPagesConfig() {
 export default defineConfig({
   site: "https://clickin.github.io",
   integrations: [
-    mdx({ remarkPlugins: [remarkRewritePostAssets] }),
+    mdx({ remarkPlugins: [remarkRenderMermaid, remarkRewritePostAssets] }),
     sitemap({
       filter: (page) => !page.includes("/blog/tag/"),
     }),
