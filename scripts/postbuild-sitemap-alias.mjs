@@ -5,6 +5,11 @@ const distDir = path.join(process.cwd(), "dist");
 const sitemapIndexPath = path.join(distDir, "sitemap-index.xml");
 const sitemapAliasPath = path.join(distDir, "sitemap.xml");
 
+if (fs.existsSync(sitemapAliasPath)) {
+  console.log("[sitemap-alias] skipped: sitemap.xml already exists.");
+  process.exit(0);
+}
+
 if (!fs.existsSync(sitemapIndexPath)) {
   console.log("[sitemap-alias] skipped: sitemap-index.xml was not found.");
   process.exit(0);
