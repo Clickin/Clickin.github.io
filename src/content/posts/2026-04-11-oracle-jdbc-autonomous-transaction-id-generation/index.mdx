@@ -1,0 +1,378 @@
+---
+title: "Oracle JDBC 채번 테이블 병목을 PRAGMA AUTONOMOUS_TRANSACTION으로 끊은 이야기"
+description: "Oracle JDBC/JTA 환경에서 최근 겪은 long running lock 장애를 바탕으로, 채번이 실패하던 구조를 autonomous transaction stored procedure로 끊은 과정을 정리한 회고입니다."
+date: 2026-04-11
+category: "Database > Oracle"
+tags: ["Oracle", "JDBC", "JTA", "UserTransaction", "PLSQL", "AutonomousTransaction", "MyBatis", "Lock"]
+draft: false
+publish: true
+---
+
+최근 회사에서 long running lock 때문에 장애를 겪었고, 그 과정에서 Oracle + JDBC 애플리케이션의 테이블 기반 채번 문제를 어떻게 끊을지 정리하게 됐습니다. 테이블 기반채번 로직 자체만 놓고 보면 문제가 없을 수 있지만, real world 어플리케이션의 트랜잭션 경계 내에서 장시간 row lock을 잡으면 뒤따르는 요청이 실패하는 문제입니다.
+
+처음엔 애플리케이션 쪽에서 트랜잭션 경계를 더 잘게 쪼개면 해결될 줄 알았습니다. 그런데 JDBC 전체가 이미 JTA `UserTransaction` 기반으로 묶여 있었기 때문에, 적어도 제가 쓰던 애플리케이션 경로에서는 채번 구간만 nested transaction처럼 따로 떼어낼 수 없었습니다. Jakarta Transactions API도 `begin()` 호출 시 현재 스레드가 이미 트랜잭션에 묶여 있고 트랜잭션 매니저가 nested transaction을 지원하지 않으면 `NotSupportedException`이 날 수 있다고 설명합니다.[^jta-user-transaction] 그래서 채번은 애플리케이션 바깥, 즉 DB 레벨의 autonomous routine으로 내려야 했습니다. 그중에서도 저는 **side effect를 숨기지 않는 stored procedure** 쪽을 골랐습니다.
+
+[^jta-user-transaction]: Jakarta EE Platform API, `jakarta.transaction.UserTransaction` — `begin()`은 현재 스레드가 이미 transaction과 연결돼 있고 transaction manager가 nested transaction을 지원하지 않으면 `NotSupportedException`을 던질 수 있다고 설명합니다. https://jakarta.ee/specifications/platform/11/apidocs/jakarta/transaction/usertransaction
+
+이 글은 long running lock 때문에 채번이 실패하는 구조를 이번에 어떤 기준으로 끊었는지, 그 판단 과정을 Oracle 예시로 정리한 회고입니다.
+
+- long transaction 안에서 채번 row lock을 오래 들고 있으면 뒤 요청이 채번 단계에서 막히거나 실패하기 쉬워집니다.
+- 채번만 autonomous transaction procedure로 분리하면 JDBC 트랜잭션과 무관하게 lock 구간을 짧게 끊을 수 있습니다.
+- 제 애플리케이션은 JTA `UserTransaction`을 사용했기 때문에 애플리케이션 레벨 중복 트랜잭션이 불가능했습니다. 그래서 채번은 DB 레벨 autonomous routine으로 내려야 했고, 그 표현으로는 side effect를 더 명시적으로 드러내는 procedure를 골랐습니다.[^oracle-autonomous-fn]
+- Spring이라면 `@Transactional(propagation = Propagation.REQUIRES_NEW)`로 비슷한 격리를 시도할 수 있습니다. 다만 이 경우 기존 트랜잭션 suspend, 새 physical transaction 시작, JDBC/JPA 호출, commit, 원래 트랜잭션 resume 흐름을 추가로 타므로, nested/independent transaction이 가능한 환경이라도 procedure 안에서 끝내는 방식보다 애플리케이션 레이어 오버헤드가 큽니다.[^spring-requires-new]
+- commit이 필요한 채번 로직은 `select SOME_FN() from dual` 같은 SQL context 함수 호출로 밀어 넣기보다, 처음부터 **stored procedure + `CallableStatement`**로 드러내는 편이 안전합니다.
+
+[^spring-requires-new]: Spring Framework Reference, "Transaction Propagation" — `PROPAGATION_REQUIRES_NEW`는 기존 외부 transaction에 참여하지 않고 독립적인 physical transaction을 사용하며, outer transaction 자원은 묶여 있는 동안 inner transaction이 새 DB connection 같은 자원을 획득한다고 설명합니다. Spring Javadoc `Propagation.REQUIRES_NEW`도 기존 transaction이 있으면 suspend한다고 설명합니다. https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html / https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/annotation/Propagation.html
+
+---
+
+## 왜 채번이 실패하는 구조가 되었나
+
+시퀀스 객체 대신 채번 테이블을 사용해야할 때가 있습니다. 한 테이블 안에서만 잠깐 쓰는 번호라면 `MAX(seq) + 1` 같은 방식으로 버틸 수도 있지만, 여러 로직이나 여러 테이블이 같은 번호 체계를 공유해야 하면 보통은 채번 테이블을 따로 두게 됩니다. 예를 들면 `seq_name='ORDER'` 같은 row 하나를 두고 그 값을 계속 증가시키는 방식입니다. 이때도 채번 방식 자체는 단순합니다. 단지 그 row에 대한 lock이 필요해질 뿐이죠.
+
+보통은 중복 번호를 막기 위해 아래처럼 `select ... for update`를 사용합니다.
+
+```sql
+SELECT next_val
+  FROM app_sequence
+ WHERE seq_name = 'ORDER'
+ FOR UPDATE WAIT 10;
+```
+
+Oracle 문서에서도 `SELECT FOR UPDATE`는 update/delete 전에 특정 row를 명시적으로 잠그기 위한 문장으로 설명합니다. active set에 포함된 row는 open 시점에 잠기고, 다른 세션은 그 row에 대한 lock을 기다리게 됩니다.[^oracle-for-update]
+
+[^oracle-for-update]: Oracle Database 23ai Precompiler Programmer's Guide, "Defining and Controlling Transactions" — `SELECT FOR UPDATE OF identifies the rows that will be updated or deleted, then locks each row in the active set. (All rows are locked at the open, not as they are fetched.)` https://docs.oracle.com/en/database/oracle/oracle-database/23/zzpre/defining-controlling-transactions.html
+
+채번 직후 바로 commit하는 짧은 트랜잭션이면 그럭저럭 버틸 수 있습니다. 그런데 제가 본 시스템은 그렇지 않았습니다. 복잡한 JOIN 으로 이루어진 SQL 로 검증하고 여러 테이블에 상태를 update하거나 insert 했습니다. 모두 같은 JDBC 트랜잭션 안에 붙어 있었고, 그동안 채번 row lock도 같이 살아 있었습니다.
+
+결국 채번 row lock의 점유 시간은 테이블에서 채번하는 로직 경계가 아니라 **업무 전체 트랜잭션 길이**에 끌려다니게 됩니다.
+
+---
+
+## long running lock이 어떻게 채번 실패로 이어졌나
+
+제가 문제를 이해한 방식은 아래와 비슷했습니다.
+
+```text
+세션 A
+  BEGIN UserTransaction
+  SELECT next_val FROM app_sequence WHERE seq_name = 'ORDER' FOR UPDATE
+  orders INSERT
+  order_items INSERT
+  inventory UPDATE
+  검증 쿼리
+  외부 시스템 연동
+  COMMIT
+
+세션 B
+  BEGIN UserTransaction
+  SELECT next_val FROM app_sequence WHERE seq_name = 'ORDER' FOR UPDATE  -- 세션 A가 lock 해제할 때까지 대기
+
+세션 C
+  BEGIN UserTransaction
+  SELECT next_val FROM app_sequence WHERE seq_name = 'ORDER' FOR UPDATE  -- 세션 B 뒤에서 또 대기
+
+세션 D...
+```
+
+이 구조에서는 사용자가 늘어날수록 같은 채번 row를 기다리는 세션이 줄줄이 쌓입니다. 운영 관점에서 보면 세션들이 서로 멈춘 것처럼 보이고, 동시에 많은 요청이 몰리면 채번 단계에서 오래 대기하다가 결국 실패로 처리되기도 했습니다. 사용자들은 오류가 발생한 데이터를 다시 처리하기 위해서 계속해서 시도하는 유사 DDoS를 수행하고 있었죠.
+
+특히 long transaction 안에서 다른 테이블 DML까지 많이 섞이면, 채번 lock 하나가 뒤쪽 업무 전체를 병목으로 만들어버립니다. 채번 자체는 row 하나 증가시키는 일인데 여기서 기다리느라 전체 시스템을 무겁게 만들었습니니다.
+
+### 이번에 확인한 포인트
+
+이 문제는 로컬이나 테스트 DB에서도 비교적 쉽게 드러납니다. 제가 이번에 구조를 확인할 때도 시나리오를 일부러 단순하게 만들면 문제가 바로 보였습니다.
+
+1. 세션 초반에 `select ... for update`로 채번 row를 잠급니다.
+2. 같은 트랜잭션 안에서 다른 테이블에 insert/update/delete를 여러 번 수행합니다.
+3. 중간에 `sleep`, 복잡한 검증 쿼리, 추가 조회를 넣어 트랜잭션 시간을 늘립니다.
+4. 동시에 여러 세션이 같은 `seq_name='ORDER'`를 요청하게 만듭니다.
+5. 후속 세션들이 채번 row lock을 기다리는 동안 응답 지연이 급격히 커지는지 봅니다.
+
+여기서 볼 건 TPS보다 **lock hold time**과 **wait queue 길이**입니다. 채번 row 하나가 오래 잠겨 있으면, 뒤쪽 로직이 아무리 잘 분산돼 있어도 그 row 앞에서 직렬화가 일어나고 결국 채번 실패로 이어질 조건이 만들어집니다.
+
+---
+
+## 제가 택한 해결책: 채번만 autonomous transaction으로 분리
+
+제가 택한 건 애플리케이션 전체 트랜잭션을 건드리지 않고, **채번 로직만 저장 프로시저의 autonomous transaction으로 분리**하는 방식이었습니다.
+
+Oracle의 autonomous transaction은 메인 트랜잭션과 완전히 독립적으로 시작됩니다. Oracle 문서 표현을 그대로 쓰면, autonomous transaction은 시작 후 메인 트랜잭션과 **lock, resource, commit dependency를 공유하지 않습니다**.[^oracle-autonomous]
+
+[^oracle-autonomous]: Oracle Database 23ai PL/SQL Language Reference, "Autonomous Transactions" — `After starting, an autonomous transaction is fully independent. It shares no locks, resources, or commit-dependencies with the main transaction.` https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpls/autonomous-transactions.html
+
+상위 JDBC/JTA 트랜잭션이 길게 살아 있어도, 채번 프로시저 안에서 row를 잠그고 값을 증가시킨 뒤 바로 commit하면 채번 row lock은 거기서 끝납니다. 이후 상위 트랜잭션이 주문 insert를 계속하든, 마지막에 rollback되든, 채번 row lock 점유 시간과는 분리됩니다.
+
+저는 이걸 native sequence의 완전한 대체재라고 보지는 않습니다. 다만 **기존 테이블 기반 채번을 유지해야 하는 환경에서 userland가 만든 유사 sequence object**라고 부를 정도는 된다고 봤습니다. 번호 발급만 짧은 독립 단위로 끝낸다는 점이 비슷했기 때문입니다. 대신 메인 트랜잭션이 검증에 실패해서 rollback된다면 번호의 gap은 생길 수 있습니다.
+
+---
+
+## 왜 userland nested transaction보다 DB 레벨이 나았나
+
+제 애플리케이션은 Spring이 아니었습니다. 더 중요한 건 프레임워크보다 트랜잭션 모델이었습니다. 채번 호출 경로가 JTA `UserTransaction` 위에 있었기 때문에 애플리케이션 레벨 중복 트랜잭션이 불가능했고, 그래서 채번은 DB 레벨 autonomous routine으로 내려야 했습니다. 그다음 남는 선택지는 function으로 숨기느냐, procedure로 드러내느냐였습니다.
+
+비교 대상으로는 Spring의 `@Transactional(propagation = Propagation.REQUIRES_NEW)`를 떠올릴 수 있습니다. 테이블 채번 로직만 별도 트랜잭션으로 격리하려면 보통 이런 식의 형태가 됩니다.
+
+```java
+@Service
+public class OrderIdAllocator {
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public long allocateOrderId() {
+        // sequence row SELECT ... FOR UPDATE
+        // next_val UPDATE
+        return allocatedId;
+    }
+}
+```
+
+다만 Spring 문서 기준으로 `REQUIRES_NEW`는 항상 **독립된 physical transaction**을 사용합니다.[^spring-requires-new] 즉 호출 흐름은 대략 아래와 같습니다.
+
+1. 기존 트랜잭션 suspend
+2. 새 physical transaction 시작
+3. 채번용 JDBC/JPA 호출
+4. commit
+5. 원래 트랜잭션 resume
+
+이 방식도 문제를 풀 수는 있습니다. 다만 구조상 채번 한 번마다 애플리케이션 레이어에서 transaction context suspend/resume, 별도 physical transaction 시작/종료, 추가 resource acquisition이 한 번 더 들어갑니다. 반면 stored procedure는 DB 안에서 `lock -> update -> commit`을 끝내고 결과만 돌려줍니다. 그래서 nested/independent transaction이 가능한 환경이라도, 채번처럼 짧은 단위는 procedure 완결형이 애플리케이션 레이어 오버헤드가 더 적습니다.
+
+- 상위 트랜잭션과 하위 트랜잭션의 관계를 애플리케이션 코드가 직접 관리해야 합니다.
+- 예외 전파와 rollback 의미가 호출 위치마다 달라집니다.
+- 잘못 구현하면 같은 채번 row에 대한 충돌을 오히려 더 이해하기 어려워집니다.
+- 운영에서 봤을 때 "어느 커넥션이 언제 번호를 확정했는지"를 추적하기가 불편합니다.
+
+반면 autonomous transaction procedure는 **번호 발급이라는 작은 단위를 DB 안에서 완결**합니다. lock 획득, 값 증가, commit, 예외 rollback이 모두 한 군데에 모입니다. 적어도 채번만 놓고 보면, userland nested transaction보다 **DB level에서 끝내는 편이 키 충돌과 경합 위험을 줄이기 더 쉬웠습니다**.
+
+여기서 말하는 장점은 "gap 없는 번호"가 아닙니다. 오히려 반대입니다. autonomous transaction으로 번호를 먼저 확정하면, 상위 업무 트랜잭션이 나중에 rollback되어도 그 번호는 회수되지 않습니다. 그래서 이 방식은 **lock 구간을 줄이기 위한 선택**이지, 절대 연속 번호를 보장하기 위한 선택은 아닙니다.
+
+---
+
+## 왜 autonomous function이 아니라 procedure를 골랐나
+
+이 부분은 처음부터 분명히 해두는 편이 낫습니다. Oracle 문서 기준으로 보면, **autonomous function도 SQL에서 호출되면서 자체 transaction을 commit할 수 있습니다**.[^oracle-autonomous-fn] 즉 `select some_fn() from dual` 같은 경로가 기술적으로 불가능한 것은 아닙니다.
+
+Oracle 문서에도 `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE` 같은 SQL 문장에서 호출된 서브프로그램은 `PRAGMA AUTONOMOUS_TRANSACTION`이 없는 한 transaction control statement를 실행할 수 없다고 정리돼 있습니다.[^oracle-fn-sql] 뒤집어 말하면 `PRAGMA AUTONOMOUS_TRANSACTION`이 있다면 그 예외가 성립합니다.
+
+[^oracle-fn-sql]: Oracle Database 23ai PL/SQL Language Reference, "PL/SQL Functions that SQL Statements Can Invoke" — SQL statement에서 호출되는 subprogram은 `PRAGMA AUTONOMOUS_TRANSACTION`이 없는 한 `COMMIT` 같은 transaction control statement를 실행할 수 없다고 설명합니다. https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpls/pl-sql-functions-that-sql-statements-can-invoke.html
+
+[^oracle-autonomous-fn]: Oracle Database PL/SQL Language Reference, "Autonomous Transactions"의 Example 7-48은 SQL query가 autonomous function을 호출해 테이블에 insert 후 commit하는 예시를 보여줍니다. 같은 문서와 `AUTONOMOUS_TRANSACTION` pragma 설명은 autonomous routine이 main transaction과 독립적이라고 설명합니다. https://docs.oracle.com/en/database/oracle/oracle-database/26/lnpls/autonomous-transactions.html / https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpls/AUTONOMOUS_TRANSACTION-pragma.html
+
+그래서 제 판단 포인트는 "function이 가능하냐"가 아니라 "이 side effect를 어떤 표면으로 드러내는 게 맞느냐"였습니다. 채번의 주 호출 경로를 `select SOME_FN() from dual`처럼 SQL context에 두는 순간, 코드 리뷰나 운영 문맥에서 오해가 쉽게 생깁니다. 호출하는 쪽에서는 그 함수가 단순 계산 함수인지, 내부에서 lock+update+commit까지 하는지 이름만 보고는 드러나지 않습니다.
+
+게다가 채번은 본질적으로 **부수효과가 있는 쓰기 작업**입니다. 번호를 발급하면 row가 바뀌고 commit까지 일어납니다. 이런 성격의 로직은 SQL expression처럼 보이게 두기보다, 처음부터 procedure 호출로 드러내는 편이 낫습니다.
+
+그래서 저는 이 글에서도 경로를 분명하게 가져가려 했습니다.
+
+- 메인 예시: **stored procedure + `CallableStatement`**
+- 보조 설명: autonomous transaction function도 만들 수는 있지만, 메인 채번 경로로 권장하지 않음
+- 특히 `select fn() from dual` 같은 SQL context 호출은 채번 메인 패턴으로 채택하지 않음
+
+함수 예시를 넣더라도 핵심은 같습니다. function도 autonomous하게 만들 수는 있지만, 채번처럼 상태를 바꾸는 로직은 계산식처럼 보이게 숨기지 않는 편이 낫습니다. 그래서 저는 **부수효과를 명시적으로 드러내는 `CallableStatement` + stored procedure** 쪽을 메인 패턴으로 잡았습니다.
+
+---
+
+## Oracle 예시: 채번 테이블
+
+예시 테이블은 단순하게 두겠습니다.
+
+```sql
+CREATE TABLE app_sequence (
+    seq_name    VARCHAR2(50) PRIMARY KEY,
+    next_val    NUMBER(19)   NOT NULL,
+    updated_at  TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL
+);
+
+INSERT INTO app_sequence (seq_name, next_val, updated_at)
+VALUES ('ORDER', 1000001, SYSTIMESTAMP);
+```
+
+이 테이블은 Oracle sequence object와 달리 애플리케이션이 직접 row를 관리합니다. 그래서 번호 발급 정책을 커스터마이즈하기는 쉽지만, 반대로 lock 경합도 직접 책임져야 합니다.
+
+---
+
+## Oracle 예시: autonomous transaction procedure
+
+핵심 아이디어는 단순합니다.
+
+1. 프로시저 안에서 `PRAGMA AUTONOMOUS_TRANSACTION` 선언
+2. 대상 row를 `FOR UPDATE`로 잠금
+3. 현재 번호를 읽고 다음 값으로 증가
+4. 즉시 `COMMIT`
+5. 발급 번호를 OUT 파라미터로 반환
+
+```sql
+CREATE OR REPLACE PROCEDURE allocate_id (
+    p_seq_name IN  VARCHAR2,
+    p_allocated OUT NUMBER
+) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+    v_next_val NUMBER;
+BEGIN
+    SELECT next_val
+      INTO v_next_val
+      FROM app_sequence
+     WHERE seq_name = p_seq_name
+       FOR UPDATE;
+
+    UPDATE app_sequence
+       SET next_val = v_next_val + 1,
+           updated_at = SYSTIMESTAMP
+     WHERE seq_name = p_seq_name;
+
+    p_allocated := v_next_val;
+
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;
+/
+```
+
+Oracle 문서에서도 autonomous transaction은 메인 트랜잭션과 독립적이며, 종료 전 `COMMIT` 또는 `ROLLBACK`으로 끝내야 한다고 설명합니다.[^oracle-autonomous-end]
+
+[^oracle-autonomous-end]: Oracle Database 23ai PL/SQL Language Reference, "Autonomous Transactions" — autonomous transaction은 main transaction과 독립적이며, 종료 전 `COMMIT` 또는 `ROLLBACK`이 필요합니다. https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpls/autonomous-transactions.html
+
+이렇게 하면 채번 row lock은 이 프로시저 안에서만 짧게 유지됩니다. 상위 JDBC 트랜잭션이 이후 5초를 더 쓰든, 마지막에 rollback되든, 채번 row lock은 이미 해제된 상태입니다.
+
+---
+
+## JDBC에서는 이렇게 호출하는 편이 낫다
+
+애플리케이션에서는 일반 SQL처럼 `select allocate_id_fn() from dual`을 날리는 대신, **`CallableStatement`로 프로시저를 호출**하는 쪽이 의도가 분명합니다.[^jdbc-callable] function으로도 구현할 수는 있지만, 채번이 조회가 아니라 번호 소비와 commit을 동반한 작업이라는 점을 호출부에서 바로 읽히게 하는 편이 운영과 유지보수에 유리합니다.
+
+[^jdbc-callable]: Java SE 8 API, `java.sql.CallableStatement` — stored procedure 호출용 JDBC 인터페이스. https://docs.oracle.com/javase/8/docs/api/java/sql/CallableStatement.html
+
+JDBC 쪽은 아래 정도로 보면 됩니다.
+
+```java
+UserTransaction utx = ...;
+DataSource dataSource = ...;
+
+utx.begin();
+
+try (Connection con = dataSource.getConnection();
+     CallableStatement cs = con.prepareCall("{ call allocate_id(?, ?) }") ) {
+
+    cs.setString(1, "ORDER");
+    cs.registerOutParameter(2, Types.NUMERIC);
+    cs.execute();
+
+    long orderId = cs.getLong(2);
+
+    // 여기서부터는 긴 업무 트랜잭션
+    // orders insert
+    // order_items insert
+    // inventory update
+    // 추가 검증/조회
+
+    utx.commit();
+} catch (Exception e) {
+    utx.rollback();
+    throw e;
+}
+```
+
+이 흐름의 핵심은 `allocate_id()` 호출 시점의 row lock이 **JDBC 업무 트랜잭션 전체 길이와 분리**된다는 점입니다. 호출 직후 business DML이 길어져도, 채번 lock은 이미 autonomous transaction의 commit으로 끝났습니다.
+
+실무에서 MyBatis를 쓰고 있다면 mapper에서 같은 프로시저 호출을 감쌀 수 있습니다. 그래도 중요한 건 프레임워크보다 호출 모델입니다. **채번은 읽기 함수처럼 보이는 SQL expression이 아니라, 명시적인 procedure call로 드러내는 편이 운영과 유지보수에 유리합니다.**
+
+---
+
+## 바꾸기 전과 후를 나란히 보면
+
+이번에 정리한 구조를 전후로 나란히 놓고 보면, 왜 이 변경이 채번 실패를 줄이는 쪽으로 작동했는지가 더 분명해집니다.
+
+### 1) 기존 방식: long transaction 안에서 lock 유지
+
+```text
+[세션 A]
+BEGIN
+SELECT next_val ... FOR UPDATE
+orders INSERT
+order_items INSERT
+inventory UPDATE
+검증 쿼리
+추가 로직
+COMMIT
+
+[세션 B, C, D]
+BEGIN
+SELECT next_val ... FOR UPDATE  -- 대기
+```
+
+이 경우 lock hold time은 채번 코드 길이가 아니라 **상위 업무 로직 길이**에 따라 결정됩니다. long running lock이 길어질수록 뒤 요청은 채번 단계에서 실패 쪽으로 밀리기 쉽습니다.
+
+### 2) 변경 방식: autonomous transaction으로 채번만 분리
+
+```text
+[세션 A]
+BEGIN UserTransaction
+CALL allocate_id(...)  -- 내부에서 lock, update, commit 종료
+orders INSERT
+order_items INSERT
+inventory UPDATE
+추가 로직
+COMMIT
+
+[세션 B, C, D]
+CALL allocate_id(...)  -- 앞선 채번 COMMIT 후 순차 진행
+```
+
+이 경우 대기열이 완전히 사라진다고 말할 수는 없습니다. 같은 row를 갱신하는 이상 직렬화는 남습니다. 다만 **직렬화 구간이 번호 발급 로직 길이로 축소**됩니다. 제가 해결했다고 느낀 지점도 성능 일반론보다는, 채번 실패를 유발하던 long running lock 구간이 여기서 끊겼다는 점에 있었습니다.
+
+---
+
+## sequence object와 비교하면 어디까지 비슷한가
+
+이 패턴은 Oracle이나 PostgreSQL의 native sequence object와 완전히 같지는 않습니다. sequence는 DB가 제공하는 전용 객체이고, 성능과 동시성 처리도 훨씬 더 표준화돼 있습니다. sequence를 쓸 수 있다면 대개 그쪽이 더 단순합니다.
+
+다만 기존 시스템이 이미 테이블 기반 채번 규칙에 강하게 묶여 있다면, autonomous transaction procedure는 **"테이블로 만든 userland 유사 sequence"** 정도의 현실적인 개선안은 될 수 있습니다.
+
+둘의 차이는 분명히 적어두는 편이 좋습니다.
+
+- **native sequence**: DB가 번호 발급을 전담
+- **table + autonomous procedure**: 애플리케이션/PLSQL이 번호 발급 정책을 직접 관리
+- 공통점: 번호 발급 단위를 짧은 독립 경로로 분리하려는 목적
+- 차이점: 구현 책임과 운영 책임이 userland 쪽에 더 큼
+
+PostgreSQL도 최신 문서에서 transaction control은 `CALL`로 호출된 procedure 또는 top-level anonymous block에서 가능하다고 설명합니다.[^pg-call]
+
+[^pg-call]: PostgreSQL documentation, "41.8 Transaction Management" — transaction control은 `CALL`로 호출된 procedure와 anonymous `DO` block에서 가능하다고 설명합니다. https://www.postgresql.org/docs/current/plpgsql-transactions.html
+
+그래서 PG를 같이 떠올릴 수는 있습니다. 다만 이 글의 예시는 Oracle의 `PRAGMA AUTONOMOUS_TRANSACTION` 기준으로 설명하는 편이 안전합니다. 같은 이름으로 바로 1:1 대응시키면 오히려 독자를 헷갈리게 할 수 있습니다.
+
+---
+
+## 트레이드오프도 분명합니다
+
+물론 이 방식이 항상 정답은 아닙니다. 제가 실제로 중요하게 본 트레이드오프는 아래였습니다.
+
+### 1. 번호 gap은 생길 수 있습니다
+
+autonomous transaction에서 번호를 먼저 commit했는데 상위 업무 트랜잭션이 rollback되면, 그 번호는 비게 됩니다. sequence를 써도 비슷한 성격의 gap은 생길 수 있기 때문에, **절대 연속 번호**가 필요한 도메인이라면 이 문제를 별도로 다뤄야 합니다.
+
+### 2. lock 경합은 줄어들지만 직렬화 자체는 남습니다
+
+같은 `seq_name='ORDER'` row를 모두 갱신한다면, 번호 발급은 여전히 한 줄로 섭니다. 다만 그 줄이 긴 업무 트랜잭션 전체 길이가 아니라, 채번 프로시저 실행 시간만큼으로 짧아지는 것입니다.
+
+### 3. sequence를 쓸 수 있다면 그게 더 단순할 수 있습니다
+
+기존 정책 때문에 꼭 테이블 기반 채번을 유지해야 하는 게 아니라면, 저는 먼저 native sequence나 identity로 바꿀 수 있는지를 검토하는 편이 더 낫다고 봅니다. 이 글의 패턴은 어디까지나 **"기존 테이블 채번을 당장 버리기 어려운 상황에서의 현실적인 개선책"**에 가깝습니다.
+
+---
+
+## 정리
+
+이번에 정리해보니 결론은 단순했습니다. **채번 실패의 직접 원인은 번호 증가 연산 자체보다, 그 row lock이 상위 JDBC 트랜잭션에 묶여 오래 살아남는 구조**에 더 가까웠습니다.
+
+그래서 저는 채번만큼은 userland nested transaction으로 흉내 내기보다, Oracle stored procedure 안에서 autonomous transaction으로 짧게 끝내는 편이 더 단순하고 안전하다고 봤습니다. 적어도 채번 row lock의 점유 시간을 업무 전체 트랜잭션에서 떼어내고, long running lock 때문에 채번이 실패하던 구조를 끊는 데는 효과가 분명했습니다.
+
+지금 기준으로는 저는 선택 기준을 이렇게 두고 있습니다.
+
+- **sequence로 바꿀 수 있으면** 먼저 sequence 검토
+- **테이블 채번을 유지해야 하면** autonomous transaction procedure 검토
+- **함수 호출을 SQL expression처럼 숨기지 말고** procedure call로 의도를 드러내기
+
+이번 장애를 겪고 정리해보니, 적어도 이 사례는 "번호를 어디서 발급하느냐"보다 **"그 번호를 발급하는 lock을 언제 잡고 언제 놓느냐"**에 더 가까운 문제였습니다. 채번 로직 자체보다 long running lock의 경계를 먼저 끊어야 했고, 저는 그 해법을 autonomous transaction procedure에서 찾았습니다.
