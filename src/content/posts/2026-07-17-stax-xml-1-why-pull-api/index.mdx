@@ -1,0 +1,110 @@
+---
+title: "stax-xml v1 설계 노트 1: 왜 StAX 스타일 pull API인가"
+description: "SAX callback 대신 애플리케이션이 파싱 흐름을 소유하는 pull API를 stax-xml v1의 중심에 둔 이유를 설명합니다."
+date: 2026-07-17
+category: "Project > stax-xml"
+tags: ["stax-xml", "XML", "StAX", "SAX", "JavaScript", "TypeScript"]
+series: "stax-xml v1.0.0 설계 노트"
+order: 1
+draft: false
+publish: false
+---
+
+`stax-xml` v1.0.0을 릴리스했습니다. v0에서는 `StaxXmlParserSync`와 `StaxXmlParser`가 JavaScript iterator와 async iterator로 pull parsing을 제공했고, `stax-xml/converter`에는 schema API가 있었습니다.
+
+v0에서는 parser가 안정적인 event object를 만들고 사용자가 iterator로 하나씩 꺼냈습니다. StAX의 제어 흐름을 유지하면서 event를 보관하거나 다른 함수에 넘기기 쉬운 API였습니다.
+
+저는 v1에서 event 하나를 읽을 때마다 이름, text, attribute와 event object를 만드는 비용부터 줄이기 시작했습니다. cursor, batch, string arena, native addon과 Wasm까지 비교했고, 그 결과 token 탐색과 event object 생성을 분리했습니다.
+
+제가 채택한 구조는 tokenizer를 공통으로 두고 그 위에 두 가지 reader를 올리는 방식입니다. 한쪽은 현재 token을 accessor로 읽어 allocation을 아끼고, 다른 쪽은 그 token을 안정적인 event object로 만들어 편의성을 제공합니다. 입력 처리와 XML 문법은 공유하되 비용 모델은 API 이름에서 드러내기로 했습니다.
+
+v1.0.0은 pull 모델과 converter를 유지하고 내부 구조와 reader 구성을 다시 쓴 버전입니다.
+
+- parser core를 하나의 pure JavaScript `TokenCursor`로 통합했습니다.
+- 안정적인 event object가 필요한 경우는 `EventReaderSync`와 `EventReader`로 분리했습니다.
+- allocation을 줄이는 current-token 경로는 `StreamReaderSync`와 `StreamReader`로 분리했습니다.
+- 알려진 XML을 typed object로 바꾸는 일반적인 사용법은 `stax-xml/converter`에 맡겼습니다.
+- 성능 탐색에 사용한 native, Wasm, backend selection과 adapter는 public package에 넣지 않았습니다.
+
+`stax-xml` v1의 중심은 StAX 스타일의 pull API입니다. Java API의 모양을 복제하지 않고, 다음 XML 이벤트를 읽을 시점을 애플리케이션이 정하는 제어 모델만 JavaScript에 맞게 가져왔습니다.
+
+XML 파서는 문서를 순서대로 읽으며 시작 태그, 텍스트, 종료 태그 같은 이벤트를 발견합니다. 차이는 그 이벤트를 누가 요구하느냐에 있습니다.
+
+- SAX에서는 파서가 애플리케이션의 handler를 호출합니다.
+- StAX에서는 애플리케이션이 reader의 `next()`를 호출합니다.
+
+[Oracle의 StAX 설명](https://docs.oracle.com/cd/E12840_01/wls/docs103/xml/stax.html)도 이를 push와 pull의 차이로 설명합니다. SAX는 발견한 이벤트를 애플리케이션에 밀어 넣고, StAX는 애플리케이션이 필요한 이벤트를 parser에서 당겨 옵니다.
+
+## parser가 아니라 애플리케이션이 다음 event를 요청한다
+
+제가 StAX를 택한 첫 번째 이유는 성능이 아니라 애플리케이션 코드의 모양이었습니다. SAX도 전체 DOM을 만들지 않고 순차적으로 읽으므로 빠르고 메모리 효율적으로 구현할 수 있습니다.
+
+수백만 개의 `<item>` 중 조건에 맞는 첫 항목만 찾는 코드는 평범한 반복문으로 작성할 수 있습니다.
+
+```ts
+import { StreamReader, XmlEventType } from 'stax-xml';
+
+const reader = new StreamReader(response.body!);
+
+while (await reader.next()) {
+  if (
+    reader.eventType() === XmlEventType.START_ELEMENT &&
+    reader.localName() === 'item' &&
+    reader.attributeValue('id') === wantedId
+  ) {
+    console.log(reader.attributeValue('name'));
+    break;
+  }
+}
+```
+
+`break`, `return`, `throw`, `try/finally`의 의미가 평소 JavaScript와 같습니다. 파싱 흐름이 함수의 지역 제어 흐름 안에 있기 때문입니다. 읽기를 멈추는 조건과 자원 정리 위치도 눈에 보입니다.
+
+반대로 callback 기반 parser에서는 “찾았다”는 상태를 저장하고 이후 callback을 무시하거나, parser/입력 stream을 별도로 중단하고, 완료 callback과 오류 callback 사이의 정리 순서도 맞춰야 합니다. SAX가 표현할 수 없는 작업은 아니지만 애플리케이션의 제어 흐름이 parser 쪽으로 뒤집힙니다.
+
+## 비동기는 입력 경계에만 둔다
+
+`StreamReader.next()`는 내부 버퍼에 다음 token이 있으면 바로 진행하고, 입력을 보충해야 할 때만 기다립니다.
+
+```text
+network/file I/O     await가 필요한 영역
+        ↓
+byte batch ingress
+        ↓
+token scan/event     동기 계산 영역
+```
+
+애플리케이션은 `await reader.next()`라는 단일한 사용법을 가지면서도, parser core는 도착한 byte를 동기적으로 소진할 수 있습니다. 입력을 소비하는 속도 역시 reader loop가 자연스럽게 결정하므로 backpressure를 별도 callback protocol로 재구성할 필요가 없습니다.
+
+## event object가 필요한 경우와 필요하지 않은 경우
+
+v1은 pull 모델 안에서도 두 reader를 제공합니다.
+
+`EventReader`와 `EventReaderSync`는 이벤트 객체를 만듭니다. 이벤트를 다른 함수로 전달하거나 보관할 때 사용합니다.
+
+```ts
+import { EventReaderSync, XmlEventType } from 'stax-xml';
+
+for (const event of new EventReaderSync(xml)) {
+  if (event.type === XmlEventType.START_ELEMENT) {
+    console.log(event.name, event.attributes);
+  }
+}
+```
+
+`StreamReader`와 `StreamReaderSync`는 현재 token에 cursor를 두고 accessor로 값을 읽습니다. 필요한 이름이나 속성만 materialize할 수 있어 allocation에 민감한 경로에 적합합니다. Java의 [`XMLStreamReader`](https://docs.oracle.com/en/java/javase/22/docs/api/java.xml/javax/xml/stream/XMLStreamReader.html)가 `next()`, event type, text accessor를 분리한 것과 비슷한 형태지만, JavaScript stream과 iterator 관습에 맞춰 설계했습니다.
+
+결과 object의 모양이 이미 정해져 있다면 더 낮은 수준의 reader를 직접 다룰 필요도 없습니다. v1의 권장 시작점은 `stax-xml/converter`입니다. pull reader는 converter의 기반이자, object graph 전체를 만들지 않아야 하는 작업을 위한 escape hatch입니다.
+
+## pull reader에서도 남는 상태
+
+pull 방식에서도 XML 처리를 위한 상태는 남습니다.
+
+- 중첩 구조를 처리하려면 depth나 stack이 필요할 수 있습니다.
+- namespace와 entity 규칙은 여전히 지켜야 합니다.
+- text가 언제나 한 번의 이벤트로 온다고 가정해서는 안 됩니다.
+- 이벤트를 모두 객체로 보관하면 streaming의 메모리 이점은 사라집니다.
+
+달라지는 것은 이 상태를 어디에서 관리하느냐입니다. parser callback 여러 곳에 흩어 놓는 대신, 하나의 loop와 지역 변수 안에서 관리할 수 있습니다.
+
+저는 대용량 XML을 순차 처리하면서 제어 흐름, 중단, 오류, backpressure를 애플리케이션 코드 안에 두기 위해 StAX 스타일을 유지했습니다. 다음 글에서는 이 선택에 영향을 준 SAX의 제어 흐름을 구체적으로 살펴보겠습니다.

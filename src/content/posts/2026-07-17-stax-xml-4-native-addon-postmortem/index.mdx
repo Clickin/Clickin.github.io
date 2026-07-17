@@ -1,0 +1,213 @@
+---
+title: "stax-xml v1 설계 노트 4: 가장 빠른 tokenizer를 버린 이유"
+description: "Rust·napi-rs·SIMD로 만든 native XML tokenizer가 JavaScript object와 string 경계에서 장점을 잃고 결국 pure JavaScript보다 불리해진 과정을 회고합니다."
+date: 2026-07-17
+category: "Project > stax-xml"
+tags: ["stax-xml", "XML", "Rust", "Node.js", "N-API", "WebAssembly", "SIMD", "Performance"]
+series: "stax-xml v1.0.0 설계 노트"
+order: 4
+draft: false
+publish: false
+---
+
+v0의 처리량을 높이려고 여러 실행 backend를 만들었고, 가장 오래 작업한 것은 Rust native addon이었습니다. 처음부터 pure JavaScript를 고집한 것은 아닙니다. native 구현이 public API에서도 이겼다면 v1에 포함할 생각이었습니다.
+
+Rust parser core를 만들고 `napi-rs`로 Node에 연결했습니다. byte scan에는 `memchr`를 사용했고 x86-64에서는 SSE4.2와 AVX2, ARM64에서는 NEON classifier를 실험했습니다. `<`, `>`, `=`, quote 같은 structural byte를 word 단위로 찾아 mask와 span table을 만들었습니다. native package도 macOS, Linux, Windows와 architecture별로 나누고 Wasm fallback까지 준비했습니다.
+
+tokenizer benchmark에서는 기대한 결과가 나왔습니다. 하지만 JavaScript 사용자가 event를 받는 지점까지 측정하자 결과가 달라졌습니다.
+
+## tokenizer와 public reader의 처리량
+
+당시 16MiB 동일 fixture의 full-string benchmark에는 서로 다른 두 결과가 있었습니다.
+
+| 경로 | 처리량 |
+|---|---:|
+| Rust native full-spec control | 501.8 MiB/s |
+| simdxml memory comparator | 387.3 MiB/s |
+| public native `StreamReaderSync` event view | 27.6 MiB/s |
+| public native raw batch | 39.5 MiB/s |
+| 당시 pure JS event reader | 18.2 MiB/s |
+
+첫 번째 native control은 Rust 안에서 token을 찾고 필요한 span을 fold한 뒤 작은 summary만 반환했습니다. 같은 workload에서는 simdxml comparator보다 빨랐습니다. 저는 이 결과를 보고 native backend를 v1에 넣을 수 있다고 생각했습니다. 다만 이 수치는 당시 fixture와 contract에서 측정한 결과이며 parser 전체의 성능 순위로 사용할 수는 없습니다.
+
+다음에는 실제 reader가 반환해야 하는 값을 benchmark에 포함했습니다.
+
+```ts
+{
+  type: XmlEventType.START_ELEMENT,
+  name: 'item',
+  attributes: [
+    { name: 'id', value: '123' }
+  ]
+}
+```
+
+StAX reader는 element name, text, attribute name과 value를 JavaScript string으로 제공해야 합니다. event API라면 array와 object까지 만들어야 합니다. 이 계약을 포함한 public native 경로에서는 raw Rust tokenizer의 처리량 대부분이 사라졌습니다.
+
+초기 public native 구현은 당시의 pure JS event reader보다 빨랐습니다. 이후 pure JS를 current-token cursor와 lazy materialization 중심으로 다시 작성하자 격차가 닫혔고, 실제 object를 만드는 일부 end-to-end 경로에서는 pure JS가 native wrapper를 앞섰습니다. 저는 native tokenizer의 우위가 공개 API에서는 느린 속도와 큰 메모리 사용량으로 힘을 잃었고, pure JS를 최적화하면 오히려 native보다 빨라지는 경우도 생긴다고 판단했습니다. 이 결과로는 platform package, span table, bridge buffer, arena와 fallback을 유지할 이유가 없었습니다.
+
+Rust 내부에서 byte span만 계산할 때는 simdxml comparator보다 빨랐고, JavaScript string과 object까지 반환할 때는 pure JS보다 느린 경로가 있었습니다. 두 benchmark가 측정한 범위가 달랐습니다.
+
+## 입력 buffer는 복사하지 않았다
+
+입력 경계에서는 제가 원한 zero-copy가 동작했습니다. Node `Buffer`와 `Uint8Array`의 backing memory를 N-API/napi-rs를 통해 Rust의 `&[u8]`로 빌렸습니다. [`napi-rs`](https://napi-rs.github.io/napi-rs/)와 Node-API의 buffer/ArrayBuffer 접근을 사용해 XML 입력 전체를 Rust `Vec<u8>`로 다시 복사하지 않고 scan했습니다.
+
+```text
+Node Buffer / Uint8Array
+          │ backing memory borrow
+          ▼
+       Rust &[u8]
+          │ SIMD scan
+          ▼
+   event type + byte spans
+```
+
+여기까지는 의도대로였습니다. 남은 문제는 찾은 token을 JavaScript string과 object로 돌려주는 출력 경계였습니다.
+
+## 출력에서 발생한 string materialization
+
+Rust에서는 UTF-8 input의 일부를 allocation 없이 빌릴 수 있습니다. `quick-xml`이 좋은 비교 대상입니다. 정확히는 UTF-8 `char[]`가 아니라 `Vec<u8>`, `&[u8]`, `&str`과 lifetime을 사용합니다. [`quick_xml::events`](https://docs.rs/quick-xml/latest/quick_xml/events/)의 `BytesStart<'a>`는 내부에 [`Cow<'a, [u8]>`](https://docs.rs/quick-xml/latest/src/quick_xml/events/mod.rs.html)를 둘 수 있습니다.
+
+```rust
+let input: &[u8] = b"<item id='1'>text</item>";
+let name: &[u8] = &input[1..5];
+let name: &str = std::str::from_utf8(name)?;
+```
+
+`name`은 pointer와 length로 입력의 `item` 구간을 가리킵니다. UTF-8 검사는 필요하지만 character payload를 복사할 필요는 없습니다. Rust compiler는 이 `&str`이 input보다 오래 살아남지 못하게 합니다. `quick-xml`의 [`Reader` 문서](https://docs.rs/quick-xml/latest/quick_xml/reader/struct.Reader.html)가 borrowed event 때문에 일반 `Iterator`를 구현하지 않는 것도 같은 lifetime 계약 때문입니다.
+
+JavaScript에는 이에 대응하는 public String type이 없습니다. ECMAScript String은 [16-bit code unit의 불변 primitive](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-string-type)입니다. `Uint8Array.subarray()`로 zero-copy byte view를 만들 수는 있지만 그 값은 string이 아닙니다. `TextDecoder.decode()`를 호출하면 JavaScript String 값이 새로 생깁니다.
+
+```text
+Rust &[u8] span
+      │ UTF-8 decode / N-API string creation
+      ▼
+V8 String
+      │ property assignment
+      ▼
+JS attribute object → JS array → JS event object
+```
+
+native parser가 byte offset만 반환하면 JS가 span마다 decode해야 합니다. native가 Rust `String`을 만들어 반환하면 N-API가 다시 V8 String을 만들어야 합니다. object를 Rust에서 구성해도 최종 결과는 V8 heap의 object와 array여야 합니다. 어디에서 만들든 공개 API가 JavaScript 값인 이상 비용은 사라지지 않았습니다.
+
+### string cache를 검토한 결과
+
+Rust의 `&str`은 같은 UTF-8 byte 저장소를 가리키는 여러 slice를 만들 수 있습니다. Java에서도 [`CharBuffer.slice()`](https://docs.oracle.com/en/java/javase/26/docs/api/java.base/java/nio/CharBuffer.html#slice())로 같은 backing content를 공유하는 여러 `CharSequence` view를 만들 수 있습니다. 현대 JVM의 `String` 구현 자체가 항상 `char[]`를 공유한다는 뜻은 아닙니다. Java에서는 `String` 대신 buffer-backed view를 API type으로 선택할 수 있고, Rust에서는 lifetime이 붙은 `&str`을 그대로 반환할 수 있다는 점이 JavaScript와 다릅니다.
+
+JavaScript의 public API가 요구하는 값은 String primitive입니다. V8이 내부적으로 string을 internalize하거나 같은 내용을 deduplicate하더라도 ECMAScript가 이를 보장하지 않으며, UTF-8 span을 처음 String으로 만드는 decode와 V8 heap allocation은 먼저 발생합니다. 같은 element 이름이 백만 번 나오는 XML이라면 이름을 cache하고 싶어지지만, cache lookup 단계부터 문제가 생깁니다.
+
+```ts
+const names = new Map<Uint8Array, string>();
+
+const first = bytes.subarray(start, end);
+const second = bytes.subarray(start, end);
+
+names.set(first, 'item');
+names.get(second); // undefined
+```
+
+[`Map`의 key 비교](https://tc39.es/ecma262/multipage/keyed-collections.html#sec-map-objects)는 `SameValueZero`를 사용합니다. `Uint8Array`는 object이므로 같은 buffer의 같은 범위를 가리키더라도 view instance가 다르면 다른 key입니다. byte 내용을 기준으로 cache하려면 먼저 `TextDecoder`로 string key를 만들어야 하는데, 그러면 cache hit 여부를 확인하기 전에 피하려던 string allocation이 발생합니다.
+
+byte를 직접 hash해 숫자 key와 collision bucket을 관리하는 방법도 있습니다. 하지만 byte 비교, hash table과 string 보관 비용이 새로 생기고 public API에 반환할 String은 적어도 고유 값마다 한 번씩 만들어야 합니다. 저는 parser core에 별도 string intern table을 넣지 않고, accessor가 요청한 span만 materialize하는 쪽을 택했습니다.
+
+## 778MiB/s가 57MiB/s가 된 경계
+
+별도의 16MiB ASCII fixture 실험은 손실이 발생한 위치를 더 선명하게 보여 줬습니다.
+
+| 실험 경로 | 처리량 | 생성한 string |
+|---|---:|---:|
+| Rust span fold, JS transfer 없음 | 778.8 MiB/s | 해당 없음 |
+| Rust `String` 생성, transfer 없음 | 257.9 MiB/s | Rust object 967,967개 |
+| 개별 JS string으로 transfer | 57.0 MiB/s | JS string 1,537,355개 |
+| 하나의 arena string + JS slice | 103.9 MiB/s | arena 1개, slice 1,537,355개 |
+| batch string arena + JS slice | 112.0 MiB/s | arena 17개, slice 1,537,355개 |
+
+raw span만 읽을 때는 매우 빨랐습니다. Rust `String`을 만드는 순간 이미 약 3분의 1로 떨어졌고, 150만 개가 넘는 값을 JavaScript String으로 넘기자 다시 크게 떨어졌습니다. string arena는 개별 transfer보다 나았지만 public accessor가 string을 반환할 때 slice 생성과 접근 비용은 남았습니다.
+
+start-element마다 object, attribute array, attribute object를 만들자 V8 allocation과 GC 비용도 더해졌습니다. native 측의 span table, arena, Rust allocation과 V8 heap이 동시에 남아 RSS도 늘었습니다. 저는 낮은 메모리로 큰 XML을 처리하려고 StAX를 채택했는데, 이 구현은 별도 native heap과 bridge buffer를 추가하고 있었습니다.
+
+개발 후반 pure JS cursor를 같은 object-output 모양으로 최적화했습니다. 64 MiB 생성 fixture에서 pure JS는 약 207–225 MiB/s, quick-xml object-shape comparator는 약 189–215 MiB/s였습니다. Rust 쪽은 borrowed event를 JavaScript object와 같은 모양으로 만들지 않았고 비교 contract도 제한적이므로, 이를 JavaScript와 Rust의 일반적인 성능 비교로 해석할 수는 없습니다. 이 실험에서 확인한 범위는 최종 산출물이 V8 object일 때 V8 안에서 바로 만드는 경로가 경쟁력이 있었다는 정도입니다.
+
+## `SlicedString`의 allocation과 parent retention
+
+V8 내부에는 [`SlicedString`](https://chromium.googlesource.com/v8/v8/+/refs/heads/main/src/objects/string.h)이 있습니다. sequential string의 substring을 parent pointer, offset, length로 표현해 character copy를 피할 수 있습니다. 겉보기에는 Rust `&str`과 비슷하지만 계약은 전혀 다릅니다.
+
+| | Rust `&str` / `Cow::Borrowed` | V8 `SlicedString` |
+|---|---|---|
+| 공개 언어 계약 | lifetime이 있는 borrowed view | 보이지 않는 engine 구현 |
+| payload copy | UTF-8 slice라면 생략 가능 | 조건에 따라 slice 또는 copy |
+| view 자체 allocation | pointer/length 값 | V8 heap에 slice object 필요 |
+| 원본 수명 | borrow checker가 제한 | parent reference가 GC 수명 연장 |
+| 사용자의 선택 | API type으로 표현 | 선택과 임계값을 보장할 수 없음 |
+
+V8은 substring 길이와 flag에 따라 짧은 값은 복사하고 긴 값은 `SlicedString`으로 만들 수 있습니다. slice 자체도 V8 object allocation이며, 작은 token 하나가 큰 parent string을 계속 참조할 수 있습니다.
+
+```js
+let xml = await loadVeryLargeXmlAsString();
+const id = xml.substring(start, end);
+xml = null;
+
+// id가 SlicedString이면 큰 원본 string이 살아남을 수 있다.
+```
+
+V8 소스에도 불필요해진 parent를 GC할 수 있도록 slice를 잘라 내는 기능이 빠져 있다고 적혀 있습니다. 따라서 whole-document arena 하나를 만들고 token을 모두 substring으로 반환하는 설계는 copy를 줄이는 대신 parent retention으로 RSS를 키울 수 있습니다. 당시 실험이 batch-local arena와 최대 크기를 고민한 이유입니다.
+
+V8의 slice는 engine 내부 최적화일 뿐, native addon이 선택할 수 있는 zero-copy JavaScript String ABI는 아닙니다.
+
+## Python extension과의 차이
+
+Python도 UTF-8 byte slice를 `str`로 바꾸는 비용 자체를 없애지는 못합니다. CPython의 Unicode object는 code point 범위에 따라 1·2·4-byte canonical storage를 사용하므로 decode와 allocation이 필요할 수 있습니다.
+
+차이는 extension과 runtime object model의 관계입니다. Python의 모든 값은 `PyObject*`로 표현되고, [`PyUnicodeObject`도 Python 코드에 그대로 노출되는 `str`](https://docs.python.org/3/c-api/unicode.html)입니다. C나 Rust extension이 C API로 `PyUnicodeObject`, list, dict를 만들면 별도의 wrapper 표현으로 다시 변환되는 것이 아니라 그 값 자체가 정상적인 Python object입니다.
+
+```text
+native extension
+  └─ PyUnicode / PyList / PyDict 생성
+             └─ Python이 그대로 소비
+```
+
+JavaScript native addon도 N-API를 통해 V8 object를 만들 수 있으므로 기능적으로 불가능한 것은 아닙니다. 차이는 pure Python baseline이 interpreter bytecode로 token loop와 object 생성을 수행하는 반면, CPython의 대표적인 고성능 library는 object 생성까지 C extension 안에서 수행하는 모델이 자연스럽다는 점입니다. 따라서 같은 parser를 Python으로 만들었다면 native 쪽 string 생성 비용은 남아도 “pure Python loop가 native parser의 최종 경로를 앞서는” 형태는 덜 예상 밖이었을 것입니다.
+
+다만 이것은 반사실적 추정입니다. Python도 reference counting, GIL, Unicode decode와 `PyObject` allocation 비용이 있으므로 실제 benchmark 없이 native 구현이 반드시 더 빠르다고 단정할 수는 없습니다.
+
+## Wasm에도 남는 값 경계
+
+Wasm은 배포 호환성을 개선하지만 현재의 값 경계를 없애지 않습니다. JavaScript가 Wasm linear memory를 `Uint8Array`로 볼 수 있고 Wasm도 자기 memory의 XML byte를 빠르게 scan할 수 있습니다. 그러나 element 이름을 평범한 JavaScript `string`으로 반환하려면 linear memory의 UTF-8 range를 decode해 host String을 만들어야 합니다.
+
+span table이나 arena를 반환하면 boundary 호출 수는 줄일 수 있습니다. 하지만 JS accessor가 값을 읽을 때 decode/slice가 필요하고, event object는 V8 heap에 만들어야 합니다. Wasm linear memory까지 RSS에 더해지므로 native addon에서 겪은 “빠른 tokenizer, 느린 최종 materialization” 문제가 그대로 반복됩니다.
+
+AssemblyScript처럼 JavaScript와 닮은 언어로 Wasm을 작성해도 이 사실은 바뀌지 않습니다. AssemblyScript의 string은 Wasm memory 안의 runtime object이지 ECMAScript String primitive가 아닙니다.
+
+## Wasm tokenizer를 다시 검토할 조건
+
+byte tokenizer acceleration은 string 경계가 달라지면 다시 검토할 수 있습니다.
+
+WebAssembly의 [JS Text Encoding Builtins](https://github.com/WebAssembly/js-text-encoding-builtins) 제안은 Wasm memory와 JavaScript String 사이의 encode/decode를 engine이 잘 알려진 builtin으로 최적화할 수 있게 하려는 방향입니다. 2026년 7월 현재 이 제안은 [WebAssembly proposal process의 Phase 1](https://github.com/WebAssembly/proposals)에 있으므로 GA나 browser baseline이 임박했다고 전제할 수는 없습니다.
+
+언젠가 이 기능이 표준화되고 Node와 주요 browser/runtime에 널리 구현된다면 다음 구조는 다시 검토할 가치가 있습니다.
+
+```text
+JavaScript StreamReader / converter
+               │
+     bounded byte batch + state
+               ▼
+Wasm TokenCursor core (Rust/C/C++/AssemblyScript)
+               │ engine-specialized text builtin
+               ▼
+        JavaScript string/object
+```
+
+이때도 parser 전체를 Wasm으로 옮기기보다 structural scan과 token state 같은 `TokenCursor` core만 옮기는 편이 현실적입니다. I/O, async iterator, schema projection, object construction은 JavaScript에 두고, Wasm이 이길 수 있는 연속 byte 계산만 맡기는 구조입니다. 그리고 반드시 public reader의 end-to-end 처리량과 peak RSS로 판단해야 합니다.
+
+## v1에 적용한 기준
+
+이 실험 이후 v1의 판단 기준을 다음과 같이 정했습니다.
+
+- 입력 zero-copy만으로 parser 전체가 zero-copy가 되지는 않는다.
+- tokenizer 처리량은 JavaScript API 처리량이 아니다.
+- string 하나마다 native boundary를 건너는 API는 피한다.
+- arena를 쓰더라도 batch 크기를 제한해 parent retention을 막는다.
+- native heap, Wasm memory, V8 heap을 합친 RSS를 측정한다.
+- 공개 API와 다른 summary/checksum benchmark를 제품 성능으로 홍보하지 않는다.
+
+tokenizer만 놓고 보면 Rust 구현이 가장 빨랐습니다. 하지만 `stax-xml` 사용자가 받는 값은 Rust span이 아니라 JavaScript string과 object입니다. 저는 public reader의 처리량과 RSS를 기준으로 native backend를 제외하고, tokenization부터 결과 생성까지 V8 안에서 처리하도록 v1을 구성했습니다.

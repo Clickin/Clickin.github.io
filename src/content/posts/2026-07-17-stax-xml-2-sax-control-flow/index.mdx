@@ -1,0 +1,113 @@
+---
+title: "stax-xml v1 설계 노트 2: SAX API의 문제는 callback보다 깊다"
+description: "SAX push API가 복잡한 XML 처리에서 상태와 제어 흐름을 어떻게 애플리케이션 callback으로 밀어내는지 살펴봅니다."
+date: 2026-07-17
+category: "Project > stax-xml"
+tags: ["stax-xml", "XML", "SAX", "StAX", "Streaming", "API Design"]
+series: "stax-xml v1.0.0 설계 노트"
+order: 2
+draft: false
+publish: false
+---
+
+SAX는 XML streaming의 오래되고 검증된 모델입니다. parser는 문서를 앞에서부터 읽고, element가 열리거나 text가 나타날 때 등록된 handler를 호출합니다. [SAX `ContentHandler` 문서](https://docs.oracle.com/en/java/javase/23/docs/api/java.xml/org/xml/sax/ContentHandler.html)에 정의된 `startElement`, `characters`, `endElement`가 전형적인 형태입니다.
+
+전체 DOM을 만들지 않아도 되고 이벤트 전달 비용도 작습니다. 로그 변환처럼 모든 이벤트에 같은 일을 한다면 SAX가 잘 맞습니다. 제가 v0부터 pull 모델을 유지하고 v1에서 reader 구조를 다시 짠 이유는, 계층적이고 선택적인 처리를 SAX로 작성할 때 애플리케이션 코드가 빠르게 복잡해졌기 때문입니다.
+
+## callback 사이에 남는 상태
+
+활성화된 사용자만 읽는 코드를 예로 들겠습니다.
+
+```xml
+<users>
+  <user active="true">
+    <name>Alice</name>
+    <roles><role>admin</role></roles>
+  </user>
+</users>
+```
+
+SAX handler는 대략 이런 상태를 갖게 됩니다.
+
+```ts
+let currentUser: User | undefined;
+let currentText = '';
+let insideName = false;
+let insideRoles = false;
+const elementStack: string[] = [];
+
+parser.onopentag = (tag) => {
+  elementStack.push(tag.name);
+  if (tag.name === 'user' && tag.attributes.active === 'true') {
+    currentUser = { name: '', roles: [] };
+  }
+  if (currentUser && tag.name === 'name') insideName = true;
+  if (currentUser && tag.name === 'roles') insideRoles = true;
+  currentText = '';
+};
+
+parser.ontext = (text) => { currentText += text; };
+
+parser.onclosetag = (name) => {
+  if (currentUser && name === 'name' && insideName) {
+    currentUser.name = currentText;
+    insideName = false;
+  }
+  // role, user 완료, stack pop, 오류 정리도 이어진다.
+};
+```
+
+namespace, 같은 이름의 중첩 element, CDATA, 여러 번 나뉜 text까지 처리하면 flag와 stack이 더 늘어납니다. XML 구조를 추적하는 상태에 callback 사이의 실행 문맥을 복원하는 상태까지 섞입니다.
+
+pull loop에서는 하위 element를 읽는 함수를 호출하고 결과를 반환할 수 있습니다.
+
+```ts
+async function readUser(reader: StreamReader): Promise<User> {
+  const user: User = { name: '', roles: [] };
+
+  while (await reader.next()) {
+    if (reader.eventType() === XmlEventType.START_ELEMENT) {
+      if (reader.localName() === 'name') user.name = await readElementText(reader);
+      if (reader.localName() === 'role') user.roles.push(await readElementText(reader));
+    }
+    if (
+      reader.eventType() === XmlEventType.END_ELEMENT &&
+      reader.localName() === 'user'
+    ) return user;
+  }
+
+  throw new Error('Unexpected end of XML');
+}
+```
+
+pull loop에도 상태는 필요하지만 `user`와 loop를 같은 함수 안에 둘 수 있고, XML 중첩은 함수 호출로 나눌 수 있습니다.
+
+## 조기 종료와 오류 처리가 별도 protocol이 된다
+
+push parser가 입력을 주도하면 애플리케이션의 `return`은 callback 하나만 끝냅니다. 문서 전체 읽기를 멈추려면 다음을 조율해야 합니다.
+
+- parser가 제공하는 pause/close API
+- 원본 Node stream 또는 Web Stream의 취소
+- 이미 queue에 들어온 callback
+- error와 end 중 어느 경로에서 자원을 정리할지
+
+pull reader는 다음 이벤트를 요청하지 않으면 parsing을 멈춥니다. network response 취소 같은 자원 정리는 필요하지만 중단 시점은 loop의 `break` 또는 `finally`에 있습니다.
+
+비동기 작업도 마찬가지입니다. `onopentag`에서 데이터베이스 쓰기를 시작했을 때 parser가 그 Promise를 기다리는지는 SAX 구현마다 별도 계약이 필요합니다. 기다리지 않으면 동시 작업량과 순서를 직접 제한해야 하고, 기다리면 callback API 위에 backpressure protocol을 얹어야 합니다. async pull loop는 `await` 자체가 소비 속도를 정합니다.
+
+## `characters()` 호출과 text node의 경계
+
+parser는 같은 element의 text를 여러 번 전달할 수 있으므로 callback마다 덮어쓰지 말고 합쳐야 합니다. 이 동작은 SAX에만 있는 것이 아닙니다. [`XMLStreamReader` 문서](https://docs.oracle.com/en/java/javase/22/docs/api/java.xml/javax/xml/stream/XMLStreamReader.html)도 character data가 여러 이벤트로 나뉠 수 있고 coalescing 설정에 따라 달라진다고 명시합니다.
+
+streaming parser에서는 입력 chunk와 논리적 text node의 경계가 일치하지 않습니다. `stax-xml`도 이 차이를 숨기려고 무제한 text를 한 번에 모으지 않습니다. 편의 helper가 text를 합칠 때는 그만큼 문자열 allocation과 메모리를 사용합니다.
+
+## SAX가 더 나은 경우도 있다
+
+다음과 같은 작업은 push event가 자연스럽습니다.
+
+- 모든 element를 동일한 규칙으로 변환하는 pipeline
+- 이벤트를 즉시 다른 sink로 전달하는 XML rewrite
+- 기존 SAX handler 생태계와 통합하는 경우
+- 아주 작은 callback surface가 가장 중요한 hot path
+
+저는 SAX를 대체하려고 v1을 만든 것이 아닙니다. 계층적이고 선택적인 처리를 작성할 때 callback 밖에 생기는 state machine을 다루기 어려웠기 때문에 pull reader를 기본 API로 정했습니다. `stax-xml`에서는 지역 제어 흐름, 비동기 순서, 중단과 정리를 reader loop 안에서 관리합니다.
