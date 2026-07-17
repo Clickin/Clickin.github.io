@@ -1,0 +1,197 @@
+---
+title: "Node GC가 회수하지 못한 sharp RSS를 process 격리로 끊은 이야기"
+description: "개인 서비스에서 PNG/JPG를 WebP로 저장하던 중 sharp/libvips native memory가 RSS에 남던 문제를 process 격리와 worker recycle로 해결한 기록입니다."
+date: 2026-06-26
+category: "Node.js > Performance"
+tags: ["Node.js", "RSS", "NativeAddon", "sharp", "libvips", "Memory", "Docker"]
+draft: true
+publish: false
+---
+
+개인용으로 운영하는 웹 서비스에서 이미지를 저장할 때 용량을 줄이고 싶었습니다. 원본이 PNG나 JPG이면 WebP로 변환해서 저장하는 정도의 단순한 최적화였습니다.
+
+이미지 변환은 `sharp`를 사용했습니다. Node에서 가장 흔하게 쓰는 선택지고, 내부적으로 libvips를 쓰기 때문에 성능도 좋습니다. 문제는 기능이 돌아가기 시작한 뒤 메모리를 보면서 나타났습니다.
+
+이미지 변환이 끝났는데도 프로세스 RSS가 잘 내려오지 않았습니다. `process.memoryUsage().heapUsed`는 낮아졌고 V8 heap은 큰 문제가 없어 보였습니다. 그런데 Docker에서 보는 메모리 사용량과 프로세스 RSS는 계속 높게 남았습니다.
+
+이건 JavaScript 객체 누수라기보다, Node heap 바깥에서 움직이는 native memory 문제에 가까웠습니다.
+
+---
+
+## 증상: heap은 낮은데 RSS는 남는다
+
+Node에서 `process.memoryUsage()`를 보면 여러 숫자가 나옵니다.
+
+- `heapUsed`: V8이 관리하는 JavaScript heap 사용량
+- `heapTotal`: V8 heap으로 확보된 전체 크기
+- `external`, `arrayBuffers`: V8 바깥 또는 ArrayBuffer 관련 메모리
+- `rss`: OS가 이 프로세스에 resident로 잡아 둔 전체 메모리
+
+제가 겪은 증상은 `heapUsed`가 내려갔는데 `rss`가 내려가지 않는 쪽이었습니다.
+
+이미지 변환이 끝난 뒤에도 RSS가 남았습니다. native addon이 사용하는 메모리, libvips 내부 allocator, glibc arena, mmap, file-backed page cache 같은 것들이 V8 GC의 대상이 아니기 때문입니다. `global.gc()`를 호출할 수 있게 Node를 띄워도 V8 heap을 정리할 뿐, libvips가 잡았던 native heap이나 OS page cache까지 원하는 시점에 돌려주지는 않습니다.
+
+그래서 먼저 관측부터 분리했습니다.
+
+```text
+process.rss
+process.heapUsed
+process.external
+process.arrayBuffers
+rss - heapUsed
+cgroup memory.current
+cgroup memory.stat의 anon/file/kernel
+```
+
+이렇게 봐야 "Node heap이 큰가?"와 "프로세스가 OS 관점에서 계속 메모리를 붙잡고 있는가?"를 분리할 수 있습니다.
+
+---
+
+## 잘못된 해결책: page cache flush
+
+처음 떠올리기 쉬운 방법은 OS page cache를 비우는 것입니다.
+
+Linux에는 `/proc/sys/vm/drop_caches`가 있습니다. 하지만 이건 컨테이너 안의 특정 프로세스 캐시만 지우는 버튼이 아닙니다. Docker로 서비스를 돌리고 있어도 page cache는 host kernel의 전역 자원입니다. drop caches를 치면 그 host의 다른 프로세스와 컨테이너까지 영향을 받습니다.
+
+개인 서비스라고 해도 이건 부적절했습니다.
+
+```text
+문제: sharp/libvips 작업 뒤 프로세스 RSS와 page cache가 남는다.
+나쁜 해법: host OS page cache를 통째로 flush한다.
+원하는 해법: 이미지 변환 작업의 메모리 생명주기만 끊는다.
+```
+
+Docker/Kubernetes memory limit을 빡빡하게 주는 것도 주 해결책은 아니었습니다. 이미지 처리나 DB 유지보수처럼 정상적으로 RSS가 순간적으로 커지는 작업이 있습니다. cgroup memory limit은 "조금 높지만 정상 피크"와 "진짜 누수"를 구분하지 않습니다. 한계를 넘으면 OOMKill입니다.
+
+제가 원한 건 정상 피크를 막는 게 아니었습니다. 피크가 끝난 뒤에도 긴 수명의 Node 서버 프로세스가 native memory 흔적을 계속 들고 있는 걸 끊고 싶었습니다.
+
+---
+
+## 첫 번째 시도: sharp를 같은 프로세스 안에서 조심히 쓰기
+
+처음엔 같은 Node 프로세스 안에서 `sharp`를 더 얌전하게 만들었습니다.
+
+```ts
+const { default: sharp } = await import('sharp');
+
+sharp.cache({ memory: 0, files: 0, items: 0 });
+sharp.concurrency(1);
+
+await sharp(sourcePath)
+  .webp({ quality: 85, effort: 4 })
+  .timeout({ seconds: timeoutSeconds })
+  .toFile(targetPath);
+```
+
+operation cache를 줄이고, libvips concurrency도 낮췄습니다. 이것 자체는 의미가 있습니다. 불필요하게 많은 작업 메모리를 잡거나, 캐시가 오래 남는 걸 줄일 수 있습니다.
+
+하지만 이 방법은 근본적인 회수 모델이 아닙니다.
+
+`sharp.cache(false)`를 해도 모든 RSS가 즉시 내려간다는 보장은 없습니다. native addon과 allocator가 한 번 확보한 메모리는 프로세스 생명주기 안에서 재사용될 수 있고, OS에 바로 반환되지 않을 수 있습니다. Node GC는 여기까지 책임지지 않습니다.
+
+결국 "같은 프로세스 안에서 더 조심히 쓰기"만으로는 부족했습니다.
+
+---
+
+## 선택한 모델: 이미지 변환 process를 격리하고 버리기
+
+그래서 이미지 변환을 서버 프로세스에서 분리했습니다.
+
+부모 Node 프로세스는 이미지를 저장하고, WebP 변환이 필요할 때 child process에 요청합니다. child process는 `sharp`/libvips를 로드하고 변환을 수행한 뒤 결과를 IPC로 알려줍니다.
+
+worker 안의 일은 단순합니다.
+
+```js
+const { default: sharp } = await import('sharp');
+
+sharp.cache(false);
+sharp.concurrency(1);
+
+await sharp(resolve(sourcePath))
+  .webp({ quality: 85, effort: 4 })
+  .timeout({ seconds: timeoutSeconds })
+  .toFile(resolve(targetPath));
+
+process.send?.({
+  id,
+  ok: true,
+  memoryUsage: process.memoryUsage()
+});
+```
+
+중요한 건 변환이 끝났을 때 child의 `process.memoryUsage()`를 부모에게 보고하게 한 점입니다. 부모는 child RSS를 보고 worker를 계속 재사용할지, 아니면 버릴지 결정할 수 있습니다.
+
+처음 구현은 이미지 한 장마다 `fork()`하고, 변환이 끝나면 process가 종료되는 방식이었습니다. 이건 가장 확실합니다. 프로세스가 죽으면 OS가 그 프로세스의 address space를 회수합니다.
+
+하지만 매 이미지마다 process를 띄우는 비용이 있습니다. 제 서비스에서는 이미지 변환이 사용자 요청의 가장 뜨거운 경로는 아니었지만, 그래도 불필요하게 매번 fork할 이유는 없었습니다.
+
+그래서 최종 모델은 이쪽으로 잡았습니다.
+
+```text
+이미지 변환 worker를 lazy-start한다.
+일정 시간 동안 재사용한다.
+idle timeout이 지나면 kill한다.
+max age, max jobs, max RSS 중 하나라도 넘으면 현재 작업 후 recycle한다.
+timeout/error가 나면 worker를 kill하고 다음 요청에서 새로 띄운다.
+```
+
+즉 핵심은 process 격리이고, 그 위에 worker 재사용 정책을 얹은 형태입니다.
+
+---
+
+## 실측: 재사용 worker가 fork-per-image보다 낫다
+
+실제 서비스 트래픽은 매번 조건이 달라서, 먼저 이미지 변환 경로만 떼어내서 측정했습니다. 2400x1800 PNG 하나를 만들고, 같은 이미지를 WebP로 30회 변환했습니다.
+
+두 모드를 비교했습니다.
+
+- `oneshot`: 이미지마다 worker process fork
+- `persistent`: worker process 하나를 띄워 30회 변환 재사용
+
+결과는 이랬습니다.
+
+| mode | jobs | duration | jobs/sec | parent RSS before | parent RSS after | peak worker RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| oneshot | 30 | 3288ms | 9.12 | 108.8MB | 111.0MB | 88.2MB |
+| persistent | 30 | 2310ms | 12.99 | 111.5MB | 112.3MB | 89.5MB |
+
+persistent worker는 같은 작업을 약 30% 빠르게 끝냈습니다. parent RSS는 두 방식 모두 거의 늘지 않았고, worker RSS는 약 90MB 근처였습니다.
+
+이 결과를 보고 방향을 정했습니다.
+
+```text
+변환 작업은 부모 Node process에서 하지 않는다.
+하지만 이미지마다 무조건 fork하지도 않는다.
+worker를 재사용하되, idle/age/jobs/RSS 기준으로 버린다.
+```
+
+---
+
+## 왜 Docker memory limit이 아니라 process lifecycle인가
+
+컨테이너 memory limit은 최후의 안전장치입니다. 이 문제의 주 해결책으로 쓰기엔 거칠었습니다.
+
+이미지 처리나 DB 유지보수 작업은 정상적으로 RSS가 커질 수 있습니다. 어느 순간 1GB 이상 올라가는 것 자체가 곧바로 버그는 아닙니다. 문제는 작업이 끝났는데도 그 메모리 흔적이 긴 수명의 서버 프로세스에 남는 것입니다.
+
+그래서 정책은 이렇게 잡는 게 맞았습니다.
+
+```text
+정상 피크는 허용한다.
+피크 이후에도 worker RSS가 예산 이상이면 작업 완료 후 worker를 버린다.
+idle 상태가 오래가면 worker를 버린다.
+부모 서버 프로세스는 sharp/libvips native heap을 직접 품지 않는다.
+```
+
+이렇게 하면 Docker/Kubernetes가 OOMKill로 강제 종료하기 전에, 애플리케이션이 자기 작업 단위에 맞춰 메모리 생명주기를 끊을 수 있습니다.
+
+---
+
+## 결론
+
+이번 문제는 JavaScript heap 누수가 아니었습니다. `sharp`/libvips 같은 native addon을 쓰면 V8 GC 바깥의 메모리가 RSS에 남을 수 있습니다.
+
+`sharp.cache(false)`와 `sharp.concurrency(1)`은 좋은 기본값이지만, 그것만으로 RSS 회수 모델이 생기지는 않습니다. OS page cache flush는 Docker 환경에서 너무 넓은 범위에 영향을 주고, memory limit은 정상 피크까지 OOMKill로 처리할 수 있습니다.
+
+제가 선택한 해법은 process 격리였습니다.
+
+`sharp`를 제거한 게 아닙니다. `sharp`가 일하는 process를 부모 서버 process와 분리했고, 그 process를 idle/age/jobs/RSS 기준으로 버릴 수 있게 했습니다. native memory는 GC로 정리하려 하지 않고, process lifecycle로 회수했습니다.

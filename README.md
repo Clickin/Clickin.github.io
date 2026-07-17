@@ -63,7 +63,7 @@ src/content/posts/YYYY-MM-DD-slug/
 
 ## Mermaid Diagram
 
-Mermaid diagrams are rendered to static SVG during the build. Use a normal fenced code block with the `mermaid` language tag.
+Mermaid diagrams are rendered to static SVG during the build by a Sätteri Markdown plugin. Use a normal fenced code block with the `mermaid` language tag.
 
 ````mdx
 ```mermaid

@@ -34,7 +34,7 @@ export function buildCuratedSitemapEntries({ site, postEntries, extraPaths = [] 
   for (const path of CURATED_HUB_PATHS) addEntry(path);
   for (const path of extraPaths) addEntry(path);
   for (const post of postEntries) {
-    addEntry(`/blog/${encodeURIComponent(normalizePostSlug(post.slug))}/`, post.lastmod);
+    addEntry(`/blog/${encodeURIComponent(normalizePostSlug(post.id))}/`, post.lastmod);
   }
 
   return entries;

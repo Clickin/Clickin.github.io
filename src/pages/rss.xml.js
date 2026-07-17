@@ -13,7 +13,7 @@ export async function GET(context){
       title: p.data.title,
       description: p.data.description ?? "",
       pubDate: p.data.date,
-      link: `/blog/${encodeURIComponent(normalizePostSlug(p.slug))}/`,
+      link: `/blog/${encodeURIComponent(normalizePostSlug(p.id))}/`,
     })),
   });
 }

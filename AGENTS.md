@@ -23,13 +23,13 @@ This repository uses `pnpm` only.
 
 ## Architecture
 
-This is an **Astro 5 static blog** deployed to GitHub Pages via `/.github/workflows/deploy-pages.yml`. The build pipeline is:
+This is an **Astro 7 static blog** deployed to GitHub Pages via `/.github/workflows/deploy-pages.yml`. The build pipeline is:
 
 1. `prebuild` — `scripts/copy-post-assets.mjs` copies all non-MDX files from `src/content/posts/<slug>/` → `public/posts/<slug>/`
-2. `astro build` — generates static HTML; MDX is processed with `remarkRewritePostAssets` to rewrite relative image/asset URLs to `/posts/<slug>/...`
+2. `astro build` — generates static HTML; MDX is processed with Sätteri plugins to render Mermaid and rewrite relative image/asset URLs to `/posts/<slug>/...`
 3. `postbuild` — `pagefind` indexes `dist/` for client-side search
 
-### Content model (`src/content/config.ts`)
+### Content model (`src/content.config.ts`)
 
 Posts live in `src/content/posts/YYYY-MM-DD-slug/index.mdx`. Frontmatter fields:
 

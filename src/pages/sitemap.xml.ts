@@ -12,7 +12,7 @@ export const GET: APIRoute = async ({ site }) => {
   const entries = buildCuratedSitemapEntries({
     site,
     postEntries: posts.map((post) => ({
-      slug: post.slug,
+      id: post.id,
       lastmod: (post.data.updated ?? post.data.date).toISOString(),
     })),
   });

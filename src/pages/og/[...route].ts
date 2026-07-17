@@ -112,11 +112,11 @@ const staticPages: Record<string, OgPage> = {
 
 const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
 const postPages = Object.fromEntries(
-  posts.map(({ slug, data, body }) => [
-    `blog/${normalizePostSlug(slug)}`,
+  posts.map(({ id, data, body }) => [
+    `blog/${normalizePostSlug(id)}`,
     {
       title: data.title,
-      description: buildPostDescription(data.description, body),
+      description: buildPostDescription(data.description, body ?? ""),
     },
   ])
 ) satisfies Record<string, OgPage>;
@@ -127,7 +127,6 @@ const pages = {
 };
 
 export const { getStaticPaths, GET } = await OGImageRoute({
-  param: "route",
   pages,
   getImageOptions: (_path, page) => ({
     title: page.title,

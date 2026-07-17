@@ -1,10 +1,11 @@
 import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
+import { satteri } from "@astrojs/markdown-satteri";
 import tailwindcss from "@tailwindcss/vite";
 import { transformerNotationDiff, transformerNotationHighlight } from "@shikijs/transformers";
 import { defineConfig } from "astro/config";
-import remarkRenderMermaid from "./scripts/remark-render-mermaid.mjs";
-import remarkRewritePostAssets from "./scripts/remark-rewrite-post-assets.mjs";
+import satteriRenderMermaid from "./scripts/remark-render-mermaid.mjs";
+import satteriRewritePostAssets from "./scripts/remark-rewrite-post-assets.mjs";
 
 function ghPagesConfig() {
   const isPages = process.env.GITHUB_PAGES === "true";
@@ -19,12 +20,15 @@ function ghPagesConfig() {
 export default defineConfig({
   site: "https://clickin.github.io",
   integrations: [
-    mdx({ remarkPlugins: [remarkRenderMermaid, remarkRewritePostAssets] }),
+    mdx(),
     sitemap({
       filter: (page) => !page.includes("/blog/tag/"),
     }),
   ],
   markdown: {
+    processor: satteri({
+      mdastPlugins: [satteriRenderMermaid, satteriRewritePostAssets],
+    }),
     shikiConfig: {
       themes: {
         light: "github-light",
@@ -33,6 +37,8 @@ export default defineConfig({
       transformers: [transformerNotationDiff(), transformerNotationHighlight()],
     },
   },
+  // Keep the pre-v7 HTML whitespace behavior to avoid visual regressions in existing posts.
+  compressHTML: true,
   build: {
     inlineStylesheets: "auto",
   },

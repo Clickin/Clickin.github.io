@@ -1,6 +1,6 @@
 ---
 import BaseLayout from "../../layouts/BaseLayout.astro";
-import { getCollection } from "astro:content";
+import { getCollection, render } from "astro:content";
 import { normalizePostSlug } from "../../lib/slug";
 import { isPostVisible } from "../../lib/postVisibility";
 import { site as siteCfg } from "../../site.config";
@@ -11,18 +11,18 @@ import CategorySidebar from "../../components/CategorySidebar.astro";
 
 export async function getStaticPaths() {
   const posts = await getCollection("posts", ({ data }) => isPostVisible(data));
-  return posts.map((p) => ({ params: { slug: normalizePostSlug(p.slug) }, props: { post: p } }));
+  return posts.map((p) => ({ params: { slug: normalizePostSlug(p.id) }, props: { post: p } }));
 }
 const { post } = Astro.props;
-const rendered = await post.render();
+const rendered = await render(post);
 const { Content, headings } = rendered;
-const ogImage = `/og/blog/${normalizePostSlug(post.slug)}.png`;
+const ogImage = `/og/blog/${normalizePostSlug(post.id)}.png`;
 
 const dateStr = post.data.date.toISOString().slice(0, 10);
 const updatedStr = post.data.updated ? post.data.updated.toISOString().slice(0, 10) : null;
 
 const siteUrl = Astro.site?.href ?? "https://clickin.github.io/";
-const postUrl = new URL(`/blog/${normalizePostSlug(post.slug)}/`, siteUrl).href;
+const postUrl = new URL(`/blog/${normalizePostSlug(post.id)}/`, siteUrl).href;
 
 const structuredData = {
   "@context": "https://schema.org",
@@ -111,7 +111,7 @@ const structuredData = {
       </header>
 
       {post.data.series && (
-        <Series series={post.data.series} currentSlug={post.slug} />
+        <Series series={post.data.series} currentSlug={post.id} />
       )}
 
       <Content />
@@ -121,6 +121,7 @@ const structuredData = {
     <aside class="hidden xl:block w-64 flex-shrink-0 sticky top-20 self-start">
       <TableOfContents headings={headings} />
     </aside>
+  </div>
   </div>
 </BaseLayout>
 

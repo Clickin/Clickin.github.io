@@ -47,7 +47,7 @@ const seriesPosts = posts
     </summary>
     <ol class="space-y-2 px-8 pb-4 pt-1 list-decimal text-sm text-[var(--color-text-secondary)]">
       {seriesPosts.map((post) => {
-        const isCurrent = post.slug === currentSlug;
+        const isCurrent = post.id === currentSlug;
         return (
           <li>
             {isCurrent ? (
@@ -57,7 +57,7 @@ const seriesPosts = posts
               </span>
             ) : (
               <a
-                href={`/blog/${post.slug}`}
+                href={`/blog/${post.id}`}
                 class="text-[var(--color-text)] hover:text-[var(--color-accent)] transition-colors"
               >
                 {post.data.title}

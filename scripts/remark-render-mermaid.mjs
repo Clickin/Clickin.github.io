@@ -4,7 +4,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer";
 import { renderMermaid } from "@mermaid-js/mermaid-cli";
-import { visit } from "unist-util-visit";
 
 const CACHE_DIR = path.join(process.cwd(), ".astro", "mermaid");
 const RENDERER_VERSION = "v1";
@@ -70,45 +69,31 @@ async function renderTheme(browser, source, theme) {
   return svg;
 }
 
-export default function remarkRenderMermaid() {
-  return async (tree) => {
-    const targets = [];
-
-    visit(tree, "code", (node, index, parent) => {
+export default function satteriRenderMermaid() {
+  return {
+    name: "render-mermaid",
+    async code(node) {
       if (node.lang !== "mermaid") return;
-      if (!parent || typeof index !== "number") return;
-      targets.push({ parent, index, source: node.value.trim() });
-    });
 
-    if (!targets.length) return;
+      await fs.mkdir(CACHE_DIR, { recursive: true });
+      let browser;
+      try {
+        browser = await puppeteer.launch(PUPPETEER_CONFIG);
+      } catch (error) {
+        throw new Error(
+          "Failed to launch Chromium for Mermaid rendering. Ensure Puppeteer downloaded its browser during install.",
+          { cause: error }
+        );
+      }
 
-    await fs.mkdir(CACHE_DIR, { recursive: true });
-    let browser;
-
-    try {
-      browser = await puppeteer.launch(PUPPETEER_CONFIG);
-    } catch (error) {
-      throw new Error(
-        "Failed to launch Chromium for Mermaid rendering. Ensure Puppeteer downloaded its browser during install.",
-        { cause: error }
-      );
-    }
-
-    try {
-      await Promise.all(
-        targets.map(async ({ parent, index, source }) => {
-          const [lightSvg, darkSvg] = await Promise.all(
-            THEMES.map((theme) => renderTheme(browser, source, theme))
-          );
-
-          parent.children[index] = {
-            type: "html",
-            value: wrapSvg(lightSvg, darkSvg),
-          };
-        })
-      );
-    } finally {
-      await browser.close();
-    }
+      try {
+        const [lightSvg, darkSvg] = await Promise.all(
+          THEMES.map((theme) => renderTheme(browser, node.value.trim(), theme))
+        );
+        return { rawHtml: wrapSvg(lightSvg, darkSvg) };
+      } finally {
+        await browser.close();
+      }
+    },
   };
 }
