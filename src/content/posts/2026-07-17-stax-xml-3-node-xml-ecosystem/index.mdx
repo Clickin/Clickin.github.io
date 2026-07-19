@@ -1,38 +1,38 @@
 ---
-title: "stax-xml v1 설계 노트 3: Node XML 생태계에 부족했던 한 조각"
-description: "기존 Node XML 라이브러리를 검토하고 async byte stream과 typed object 사이에 pull reader를 추가한 과정을 정리합니다."
+title: "stax-xml v1 설계 노트 3: Node XML 생태계에서 찾지 못한 StAX 스타일 API"
+description: "기존 Node XML 라이브러리와 async byte stream, typed object 사이에서 pull reader가 맡는 역할을 정리합니다."
 date: 2026-07-17
 category: "Project > stax-xml"
 tags: ["stax-xml", "XML", "Node.js", "Streaming", "TypeScript", "Web Streams"]
 series: "stax-xml v1.0.0 설계 노트"
 order: 3
 draft: false
-publish: false
+publish: true
 ---
 
-v0을 만들 때 먼저 검토한 선택지는 `sax-js`, `fast-xml-parser`, `xml2js`였습니다. SAX event를 받거나 XML 전체를 JavaScript object로 바꾸는 용도에는 이미 널리 쓰이는 구현이 있었습니다. 제가 찾지 못한 것은 async byte stream을 pull 방식으로 읽고, 필요할 때 typed object까지 만들 수 있는 API였습니다. v1을 다시 쓰면서 그 범위를 명확히 정했습니다.
+Node XML 생태계의 대표적인 선택지는 `sax-js`, `fast-xml-parser`, `xml2js`입니다. SAX event를 받거나 XML 전체를 JavaScript object로 바꾸는 용도에는 이미 널리 쓰이는 구현이 있습니다. `stax-xml`이 맡는 범위는 async byte stream을 StAX 스타일 API로 읽고, 필요할 때 typed object까지 만드는 일입니다.
 
 ## Node core의 출발점
 
 브라우저에는 `DOMParser`가 있지만 Node의 [전역 API 목록](https://nodejs.org/api/globals.html)에는 범용 XML parser나 `DOMParser`가 포함되어 있지 않습니다. Node core가 제공하는 것은 `Buffer`, stream, `TextDecoder`, Web Streams 같은 입력·실행 기반이고 XML 문법 처리는 사용자 패키지의 몫입니다.
 
-제가 검토한 라이브러리의 사용법은 크게 두 종류였습니다.
+이 라이브러리의 사용법은 크게 두 종류입니다.
 
 ### XML 전체를 JavaScript object로 변환
 
 작은 설정 파일, API 응답, SOAP message라면 element를 순회하기보다 평범한 object로 접근하는 편이 간단합니다. [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser)는 XML validation, JavaScript object 변환, XML 생성을 제공하고, [xml2js](https://github.com/Leonidas-from-XIV/node-xml2js)도 XML과 JavaScript object 사이의 변환을 주된 용도로 둡니다.
 
-이 방식으로 100MB XML에서 항목 하나만 찾거나 수 GB export를 한 행씩 DB에 넣으려면 문서 전체 또는 관심 subtree를 object graph로 materialize해야 합니다. 제가 피하려던 비용은 이 과정에서 함께 만들어지는 object와 string이었습니다. 결과 모양을 바꾸는 옵션만으로는 token 진행과 materialization 시점을 직접 통제할 수 없었습니다.
+이 방식으로 100MB XML에서 항목 하나만 찾거나 수 GB export를 한 행씩 DB에 넣으려면 문서 전체 또는 관심 subtree를 object graph로 materialize해야 합니다. 이 과정에서는 필요한 값 외의 object와 string도 함께 만들어집니다. 결과 모양을 바꾸는 옵션만으로는 token 진행과 materialization 시점을 직접 통제할 수 없습니다.
 
 ### SAX event를 callback으로 수신
 
 [`sax-js`](https://github.com/isaacs/sax-js)는 JavaScript에서 SAX 방식 parser와 stream interface를 제공해 온 대표적인 구현입니다. 전체 tree를 만들지 않고 `onopentag`, `ontext`, `onclosetag` 이벤트를 처리할 수 있으므로 큰 입력에 유리합니다.
 
-`sax-js`로 복잡한 선택 처리를 작성했을 때는 상태가 callback 사이로 흩어졌습니다. TypeScript schema에 맞는 결과를 만들려면 그 callback state machine 위에 typed layer도 따로 작성해야 했습니다.
+`sax-js`에서 복잡한 선택 처리는 상태를 callback 사이에 분산시킵니다. TypeScript schema에 맞는 결과를 만들려면 그 callback state machine 위에 typed layer도 별도로 필요합니다.
 
-## 제가 필요했던 API
+## 두 방식 사이에 필요한 API
 
-기존 라이브러리를 검토한 뒤 v1의 범위를 다음과 같이 정했습니다.
+`stax-xml` v1은 두 방식 사이의 범위를 다음과 같이 정의합니다.
 
 - 전체 DOM이나 object graph를 강제하지 않는다.
 - parser가 callback으로 제어권을 가져가지 않는다.
@@ -62,7 +62,7 @@ import { StreamReader, XmlEventType } from 'stax-xml';
 
 const reader = new StreamReader(response.body!);
 
-while (await reader.next()) {
+while (await reader.next() !== null) {
   if (reader.eventType() !== XmlEventType.START_ELEMENT) continue;
   if (reader.localName() !== 'entry') continue;
 
@@ -75,7 +75,7 @@ while (await reader.next()) {
 
 ## stream 호환은 adapter 개수보다 입력 계약이다
 
-저는 v1에 framework별 adapter를 추가하지 않고 byte stream 계약을 좁게 잡았습니다. Node의 `Readable`은 async iterable로 소비할 수 있고, fetch와 edge runtime은 Web `ReadableStream`을 제공합니다. 둘을 reader 입력에서 받으면 parser core에 Express, Fastify, Hono별 코드를 둘 필요가 없었습니다.
+v1은 framework별 adapter 대신 byte stream 계약을 좁게 정의합니다. Node의 `Readable`은 async iterable로 소비할 수 있고, fetch와 edge runtime은 Web `ReadableStream`을 제공합니다. 둘을 reader 입력에서 받으면 parser core에 Express, Fastify, Hono별 코드가 필요하지 않습니다.
 
 iterable 중심의 입력 계약은 Node.js core와 Cloudflare Workers에서 stream 구현을 다뤄 온 James M Snell의 [「We deserve a better streams API for JavaScript」](https://blog.cloudflare.com/a-better-web-streams-api/)에서 가져왔습니다. 이 글은 기존 `ReadableStream`의 문제를 다음과 같이 지적합니다.
 
@@ -91,11 +91,11 @@ Cloudflare 글의 대안은 readable stream을 별도 class hierarchy가 아니�
 
 Node나 Bun이 안정적이고 빠른 iterable stream을 제공하면 그 결과를 reader에 넘기거나 runtime별 fast path에서 사용할 수 있습니다. public contract는 iterable protocol에 두었기 때문에 특정 runtime API의 안정화 여부와 parser API를 분리할 수 있습니다.
 
-지원 범위도 함께 제한했습니다.
+지원 범위에도 다음 제한이 있습니다.
 
-- byte 입력은 UTF-8 XML을 전제로 하고 잘못된 byte sequence를 오류로 처리합니다.
+- byte 입력의 기본 encoding은 UTF-8입니다. 다른 encoding은 host `TextDecoder`가 지원하는 label로 지정할 수 있고, 잘못된 byte sequence는 오류로 처리합니다.
 - 동시에 두 번 `next()`를 호출하는 사용법은 지원하지 않습니다.
 - streaming reader를 쓴 뒤 모든 이벤트를 배열에 저장하면 bounded-memory라는 목적을 잃습니다.
 - DTD 전체 구현이나 DOM mutation API 같은 넓은 표면을 목표로 하지 않습니다.
 
-DTD 전체 구현과 DOM mutation API는 v1에 넣지 않았습니다. 기존 object mapper와 SAX parser를 대체하기보다, async byte stream을 앞으로만 읽으면서 소비자가 흐름을 소유하고 같은 tokenizer 위에서 typed object도 만들 수 있는 API에 집중했습니다.
+v1은 DTD 전체 구현과 DOM mutation API를 제공하지 않습니다. 기존 object mapper와 SAX parser를 대체하는 대신, async byte stream을 앞으로만 읽으면서 소비자가 흐름을 소유하고 같은 tokenizer 위에서 typed object도 만드는 API에 집중합니다.

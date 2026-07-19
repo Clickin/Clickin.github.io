@@ -7,7 +7,7 @@ tags: ["stax-xml", "XML", "JavaScript", "V8", "String", "WebAssembly", "Performa
 series: "stax-xml v1.0.0 설계 노트"
 order: 5
 draft: false
-publish: false
+publish: true
 ---
 
 v0 event reader의 성능을 개선하고 v1의 pure JavaScript token core를 만들면서 저는 string 비용을 가장 오래 측정했습니다. XML 파일은 대개 UTF-8 byte로 도착하지만 JavaScript 애플리케이션은 element 이름과 text를 `string`으로 받습니다. 처음에는 decode 횟수를 줄이는 데 집중했고, 이후 substring allocation과 원본 string의 수명도 측정 대상에 넣었습니다.
@@ -18,7 +18,7 @@ v0 event reader의 성능을 개선하고 v1의 pure JavaScript token core를 �
 
 ECMAScript에서 String 값은 [16-bit unsigned integer 값의 불변 sequence](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-string-type)로 정의됩니다. 그래서 `length`는 Unicode code point 수가 아니라 UTF-16 code unit 수를 셉니다. 보조 평면 문자는 surrogate pair 두 칸을 차지합니다.
 
-parser를 구현하면서 이 정의에서 두 가지 제약을 확인했습니다.
+XML parser 관점에서 이 정의에는 두 가지 제약이 있습니다.
 
 첫째, JavaScript에는 일반 애플리케이션이 사용할 수 있는 mutable string buffer나 `char[]` view가 없습니다. `Uint8Array.subarray()`는 같은 `ArrayBuffer`를 가리키는 zero-copy view를 만들 수 있지만 그 값의 type은 여전히 byte array입니다. JavaScript의 `string` primitive로 사용할 수 없고, string API에 넘기려면 `TextDecoder.decode()`처럼 byte를 string으로 바꾸는 경계를 지나야 합니다. [`TextDecoder`](https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder)는 byte array를 입력받아 새 JavaScript string 값을 반환하도록 정의되어 있습니다.
 
@@ -34,7 +34,7 @@ type BorrowedString = {
 };
 ```
 
-이 구조체를 public API로 반환하는 방법도 검토했지만 `string`이 아니어서 `===`, `Map<string, ...>`, 정규식, JSON 직렬화, DOM API에 바로 사용할 수 없었습니다. `.toString()`을 호출하면 decode와 materialization 비용도 다시 발생합니다.
+이 구조체는 `string`이 아니므로 public API로 반환해도 `===`, `Map<string, ...>`, 정규식, JSON 직렬화, DOM API에 바로 사용할 수 없습니다. `.toString()`을 호출하면 decode와 materialization 비용도 다시 발생합니다.
 
 둘째, 명세가 표현하는 이론적 범위와 실제 runtime이 허용하는 한 문자열의 크기는 다릅니다. V8의 [`String::kMaxLength`](https://chromium.googlesource.com/v8/v8/+/refs/heads/main/src/objects/string.h)는 object layout과 정수 표현 때문에 구현상 최대 길이를 둡니다. 정확한 수치는 architecture와 V8 버전에 종속되므로 애플리케이션 계약으로 삼을 수 없습니다. 수 GB XML 전체를 먼저 한 문자열로 만들면 메모리뿐 아니라 runtime의 단일 string 한계에도 닿을 수 있습니다.
 
@@ -61,7 +61,7 @@ parser에서는 다음 동작을 보장할 수 없습니다.
 
 UTF-8 문자는 1–4 byte인데 network chunk는 문자 경계를 보장하지 않습니다. 마지막 byte 몇 개가 다음 chunk로 넘어갈 수 있습니다. 각 chunk에 독립적으로 `decode()`를 호출하면 정상 문자를 replacement character로 바꾸거나 오류로 처리할 수 있습니다.
 
-streaming decoder는 이전 chunk 끝의 미완성 sequence를 보관해야 합니다. `stax-xml` v1의 byte 입력은 fatal UTF-8 decode를 사용해 잘못된 입력을 조용히 대체하지 않고 오류로 만듭니다. 동시에 작은 입력 chunk가 지나치게 많은 parser 호출을 만들지 않도록 내부 batch로 묶습니다.
+streaming decoder는 이전 chunk 끝의 미완성 sequence를 보관해야 합니다. `stax-xml` v1 byte 입력의 기본 encoding은 UTF-8이고, 다른 encoding은 host `TextDecoder`가 지원하는 label로 지정할 수 있습니다. 어느 경우든 fatal decode를 사용해 잘못된 입력을 조용히 대체하지 않고 오류로 만듭니다. 동시에 작은 입력 chunk가 지나치게 많은 parser 호출을 만들지 않도록 내부 batch로 묶습니다.
 
 XML token도 chunk 경계를 가로지를 수 있습니다.
 
@@ -78,7 +78,7 @@ v1 parser core는 현재 buffer에서 token의 시작과 끝 위치를 먼저 �
 저는 이 비용을 필요한 accessor를 호출할 때까지 미루기 위해 current-token API를 만들었습니다.
 
 ```ts
-while (await reader.next()) {
+while (await reader.next() !== null) {
   if (reader.eventType() !== XmlEventType.START_ELEMENT) continue;
 
   // name만 필요하면 모든 attribute object를 만들 필요가 없다.

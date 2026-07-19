@@ -7,12 +7,12 @@ tags: ["stax-xml", "XML", "SAX", "StAX", "Streaming", "API Design"]
 series: "stax-xml v1.0.0 설계 노트"
 order: 2
 draft: false
-publish: false
+publish: true
 ---
 
 SAX는 XML streaming의 오래되고 검증된 모델입니다. parser는 문서를 앞에서부터 읽고, element가 열리거나 text가 나타날 때 등록된 handler를 호출합니다. [SAX `ContentHandler` 문서](https://docs.oracle.com/en/java/javase/23/docs/api/java.xml/org/xml/sax/ContentHandler.html)에 정의된 `startElement`, `characters`, `endElement`가 전형적인 형태입니다.
 
-전체 DOM을 만들지 않아도 되고 이벤트 전달 비용도 작습니다. 로그 변환처럼 모든 이벤트에 같은 일을 한다면 SAX가 잘 맞습니다. 제가 v0부터 pull 모델을 유지하고 v1에서 reader 구조를 다시 짠 이유는, 계층적이고 선택적인 처리를 SAX로 작성할 때 애플리케이션 코드가 빠르게 복잡해졌기 때문입니다.
+전체 DOM을 만들지 않아도 되고 이벤트 전달 비용도 작습니다. 로그 변환처럼 모든 이벤트에 같은 일을 한다면 SAX가 잘 맞습니다. 반면 계층적이고 선택적인 처리를 SAX로 작성하면 상태와 제어 흐름이 여러 callback으로 분산됩니다. `stax-xml`이 v0부터 pull 모델을 유지하고 v1에서 reader 구조를 분리하는 이유입니다.
 
 ## callback 사이에 남는 상태
 
@@ -65,7 +65,7 @@ pull loop에서는 하위 element를 읽는 함수를 호출하고 결과를 반
 async function readUser(reader: StreamReader): Promise<User> {
   const user: User = { name: '', roles: [] };
 
-  while (await reader.next()) {
+  while (await reader.next() !== null) {
     if (reader.eventType() === XmlEventType.START_ELEMENT) {
       if (reader.localName() === 'name') user.name = await readElementText(reader);
       if (reader.localName() === 'role') user.roles.push(await readElementText(reader));
@@ -110,4 +110,4 @@ streaming parser에서는 입력 chunk와 논리적 text node의 경계가 일�
 - 기존 SAX handler 생태계와 통합하는 경우
 - 아주 작은 callback surface가 가장 중요한 hot path
 
-저는 SAX를 대체하려고 v1을 만든 것이 아닙니다. 계층적이고 선택적인 처리를 작성할 때 callback 밖에 생기는 state machine을 다루기 어려웠기 때문에 pull reader를 기본 API로 정했습니다. `stax-xml`에서는 지역 제어 흐름, 비동기 순서, 중단과 정리를 reader loop 안에서 관리합니다.
+`stax-xml` v1은 SAX를 대체하는 API가 아닙니다. 계층적이고 선택적인 처리에서는 callback 밖에 별도 state machine이 생기므로 pull reader가 기본 API입니다. 지역 제어 흐름, 비동기 순서, 중단과 정리는 reader loop 안에서 관리합니다.
