@@ -1,23 +1,10 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
+import { projects } from "../data/projects";
 import { site as siteCfg } from "../site.config";
 
 const base = import.meta.env.BASE_URL;
 
-const projects = [
-  {
-    name: "CBXShell-rs",
-    description: "Rust-based CBX shell implementation",
-    tech: ["Rust"],
-    path: "CBXShell-rs/",
-  },
-  {
-    name: "stax-xml",
-    description: "Streaming XML parser",
-    tech: ["TypeScript"],
-    path: "stax-xml/",
-  },
-];
 
 const structuredData = {
   "@context": "https://schema.org",

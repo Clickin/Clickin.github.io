@@ -1,6 +1,6 @@
 import { normalizePostSlug } from "./slug.ts";
 
-const CURATED_HUB_PATHS = ["/", "/blog/", "/projects/"];
+const BLOG_HUB_PATHS = ["/", "/blog/"];
 
 function normalizePath(path) {
   if (!path.startsWith("/")) return normalizePath(`/${path}`);
@@ -20,24 +20,24 @@ function escapeXml(value) {
     .replaceAll("'", "&apos;");
 }
 
-export function buildCuratedSitemapEntries({ site, postEntries, extraPaths = [] }) {
-  const entries = [];
-  const seen = new Set();
+export function buildBlogSitemapEntries({ site, postEntries }) {
+  const entries = BLOG_HUB_PATHS.map((path) => ({ loc: toAbsoluteUrl(site, path) }));
 
-  function addEntry(path, lastmod) {
-    const loc = toAbsoluteUrl(site, path);
-    if (seen.has(loc)) return;
-    seen.add(loc);
-    entries.push(lastmod ? { loc, lastmod } : { loc });
-  }
-
-  for (const path of CURATED_HUB_PATHS) addEntry(path);
-  for (const path of extraPaths) addEntry(path);
   for (const post of postEntries) {
-    addEntry(`/blog/${encodeURIComponent(normalizePostSlug(post.id))}/`, post.lastmod);
+    entries.push({
+      loc: toAbsoluteUrl(site, `/blog/${encodeURIComponent(normalizePostSlug(post.id))}/`),
+      lastmod: post.lastmod,
+    });
   }
 
   return entries;
+}
+
+export function buildProjectSitemapEntries({ site, projects }) {
+  return [
+    { loc: toAbsoluteUrl(site, "/projects/") },
+    ...projects.map((project) => ({ loc: toAbsoluteUrl(site, project.path) })),
+  ];
 }
 
 export function renderSitemapXml(entries) {
@@ -50,4 +50,12 @@ export function renderSitemapXml(entries) {
     .join("");
 
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${body}</urlset>`;
+}
+
+export function renderSitemapIndexXml(entries) {
+  const body = entries
+    .map(({ loc }) => `<sitemap><loc>${escapeXml(loc)}</loc></sitemap>`)
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${body}</sitemapindex>`;
 }

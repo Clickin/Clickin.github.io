@@ -8,7 +8,7 @@
     "dev": "astro dev",
     "prebuild": "node scripts/copy-post-assets.mjs",
     "build": "astro build",
-    "postbuild": "node scripts/postbuild-sitemap-alias.mjs && pagefind --site dist",
+    "postbuild": "pagefind --site dist",
     "preview": "astro preview",
     "perf:baseline": "node scripts/perf/lighthouse-baseline.mjs"
   },
@@ -16,7 +16,6 @@
     "@astrojs/markdown-satteri": "^0.3.4",
     "@astrojs/mdx": "^7.0.3",
     "@astrojs/rss": "^4.0.19",
-    "@astrojs/sitemap": "^3.7.3",
     "@shikijs/transformers": "^4.3.1",
     "@tailwindcss/vite": "^4.3.3",
     "astro": "^7.1.0",

@@ -1,5 +1,4 @@
 import mdx from "@astrojs/mdx";
-import sitemap from "@astrojs/sitemap";
 import { satteri } from "@astrojs/markdown-satteri";
 import tailwindcss from "@tailwindcss/vite";
 import { transformerNotationDiff, transformerNotationHighlight } from "@shikijs/transformers";
@@ -19,12 +18,7 @@ function ghPagesConfig() {
 
 export default defineConfig({
   site: "https://clickin.github.io",
-  integrations: [
-    mdx(),
-    sitemap({
-      filter: (page) => !page.includes("/blog/tag/"),
-    }),
-  ],
+  integrations: [mdx()],
   markdown: {
     processor: satteri({
       mdastPlugins: [satteriRenderMermaid, satteriRewritePostAssets],
