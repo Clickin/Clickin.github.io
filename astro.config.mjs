@@ -3,7 +3,7 @@ import { satteri } from "@astrojs/markdown-satteri";
 import tailwindcss from "@tailwindcss/vite";
 import { transformerNotationDiff, transformerNotationHighlight } from "@shikijs/transformers";
 import { defineConfig } from "astro/config";
-import satteriRenderMermaid from "./scripts/remark-render-mermaid.mjs";
+import satteriRenderDiagram from "./scripts/remark-render-diagram.mjs";
 import satteriRewritePostAssets from "./scripts/remark-rewrite-post-assets.mjs";
 
 function ghPagesConfig() {
@@ -21,7 +21,7 @@ export default defineConfig({
   integrations: [mdx()],
   markdown: {
     processor: satteri({
-      mdastPlugins: [satteriRenderMermaid, satteriRewritePostAssets],
+      mdastPlugins: [satteriRenderDiagram, satteriRewritePostAssets],
     }),
     shikiConfig: {
       themes: {

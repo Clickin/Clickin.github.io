@@ -122,23 +122,23 @@
     @apply max-w-full;
   }
 
-  article .mermaid-static {
+  article .diagram-static {
     @apply my-6 overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-code)] p-4;
   }
 
-  article .mermaid-static__diagram--dark {
+  article .diagram-static__diagram--dark {
     display: none;
   }
 
-  .dark article .mermaid-static__diagram--light {
+  .dark article .diagram-static__diagram--light {
     display: none;
   }
 
-  .dark article .mermaid-static__diagram--dark {
+  .dark article .diagram-static__diagram--dark {
     display: block;
   }
 
-  article .mermaid-static svg {
+  article .diagram-static img {
     display: block;
     max-width: 100%;
     height: auto;

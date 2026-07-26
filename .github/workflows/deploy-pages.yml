@@ -26,8 +26,6 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - uses: actions/configure-pages@v5
-      - name: Install Puppeteer browser
-        run: pnpm exec puppeteer browsers install chrome
       - name: Build
         env:
           GITHUB_PAGES: "true"
