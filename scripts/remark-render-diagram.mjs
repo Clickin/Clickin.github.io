@@ -8,7 +8,7 @@ import { D2 } from "@terrastruct/d2";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REGULAR_FONT_FILE = path.join(SCRIPT_DIR, "assets/fonts/NanumGothic-Regular.ttf");
 const CACHE_DIR = path.join(process.cwd(), ".astro", "diagram", "d2");
-const RENDERER_VERSION = "d2-0.1.33-nanum-gothic-v1";
+const RENDERER_VERSION = "d2-0.1.33-nanum-gothic-v2";
 const LAYOUT = "dagre";
 const THEMES = [
   { name: "light", id: 0 },
@@ -51,6 +51,14 @@ function wrapSvg(lightSvg, darkSvg) {
   ].join("");
 }
 
+function escapeHtml(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function wrapAscii(ascii) {
+  return `<pre class="diagram-ascii"><code>${escapeHtml(ascii)}</code></pre>`;
+}
+
 async function readCachedSvg(source, theme) {
   const cacheKey = createCacheKey(source, theme);
   const cacheFile = path.join(CACHE_DIR, `${cacheKey}.svg`);
@@ -85,6 +93,7 @@ async function renderDiagrams(source) {
         themeID: theme.id,
         noXMLTag: true,
         pad: 24,
+        scale: 1,
         salt: `${cached[index].cacheKey}-${theme.name}`,
       })
     ).trim();
@@ -94,14 +103,42 @@ async function renderDiagrams(source) {
   return rendered;
 }
 
+async function renderAscii(source) {
+  const compiled = await d2.compile(source, {
+    layout: LAYOUT,
+    fontRegular: regularFont,
+  });
+  return (
+    await d2.render(compiled.diagram, {
+      ...compiled.renderOptions,
+      ascii: true,
+      asciiMode: "extended",
+    })
+  ).trimEnd();
+}
+
+let renderQueue = Promise.resolve();
+
+function enqueueRender(source, ascii) {
+  const result = renderQueue.then(() => (ascii ? renderAscii(source) : renderDiagrams(source)));
+  renderQueue = result.catch(() => {});
+  return result;
+}
+
 export default function satteriRenderDiagram() {
   return {
     name: "render-diagram",
     async code(node) {
       if (node.lang !== "d2") return;
 
+      const source = node.value.trim();
+      const ascii = node.meta?.split(/\s+/).includes("ascii") ?? false;
+      if (ascii) {
+        return { rawHtml: wrapAscii(await enqueueRender(source, true)) };
+      }
+
       await fs.mkdir(CACHE_DIR, { recursive: true });
-      const [lightSvg, darkSvg] = await renderDiagrams(node.value.trim());
+      const [lightSvg, darkSvg] = await enqueueRender(source, false);
       return { rawHtml: wrapSvg(lightSvg, darkSvg) };
     },
   };

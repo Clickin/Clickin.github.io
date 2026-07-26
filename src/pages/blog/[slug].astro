@@ -56,7 +56,7 @@ const structuredData = {
   title={post.data.title} 
   description={post.data.description} 
   ogImage={ogImage} 
-  mainClass="max-w-7xl mx-auto px-4 sm:px-6"
+  mainClass="post-page-shell max-w-7xl mx-auto px-4 sm:px-6"
   type="article"
   publishDate={post.data.date}
   updatedDate={post.data.updated}
@@ -67,14 +67,13 @@ const structuredData = {
     <CategorySidebar activeCategoryPath={post.data.category.split(">").map(s => s.trim()).join("/")} />
   </div>
 
-  <div class="flex flex-col lg:flex-row gap-8 lg:gap-12 min-w-0">
+  <div class="post-layout-grid flex flex-col lg:grid lg:grid-cols-[12rem_minmax(0,1fr)] xl:grid-cols-[12rem_minmax(0,1fr)_16rem] gap-8 lg:gap-12 min-w-0">
     <!-- Left Sidebar: Categories (Hidden on mobile/tablet, shown on desktop) -->
     <aside class="cat-sidebar hidden lg:block w-48 flex-shrink-0 sticky top-20 self-start">
       <CategorySidebar activeCategoryPath={post.data.category.split(">").map(s => s.trim()).join("/")} />
     </aside>
 
-    <div class="flex-1 min-w-0 flex flex-col xl:flex-row gap-8 xl:gap-12">
-      <article class="py-4 flex-1 min-w-0 w-full break-words">
+    <article class="post-article py-4 min-w-0 w-full break-words">
         <header class="mb-8">
 
               <h1 class="text-3xl sm:text-4xl font-extrabold mb-4">{post.data.title}</h1>
@@ -118,10 +117,9 @@ const structuredData = {
       <Giscus />
     </article>
 
-    <aside class="hidden xl:block w-64 flex-shrink-0 sticky top-20 self-start">
+    <aside class="toc-sidebar hidden xl:block w-64 flex-shrink-0 sticky top-20 self-start">
       <TableOfContents headings={headings} />
     </aside>
-  </div>
   </div>
 </BaseLayout>
 

@@ -379,20 +379,22 @@
   }
 }
 
-/* ── Wide-screen layout: category sidebar floats in left page margin ───── */
-@media (min-width: 1800px) {
-  .cat-sidebar {
-    position: fixed;
-    top: 5rem; /* matches sticky top-20 */
-    left: max(1rem, calc(50vw - 640px - 192px - 2rem));
-    width: 12rem; /* w-48 */
-    max-height: calc(100vh - 6rem);
-    overflow-y: auto;
+/* ── Wide-screen article layout: sidebars anchor to viewport edges ─────── */
+@media (min-width: 96rem) {
+  .post-page-shell {
+    width: 100%;
+    max-width: none;
+    margin-inline: 0;
+    padding-inline: 3rem;
   }
 
-  /* Sidebar leaves flex flow when fixed — shift content left by 80px vs
-     original sidebar+gap (240px→160px) to expand article from 688px to 768px. */
-  .cat-sidebar + div {
-    margin-left: 10rem; /* 160px: gives article 768px width (1232−160−48−256) */
+  .post-page-shell .post-layout-grid {
+    grid-template-columns: 12rem minmax(0, 1fr) 16rem;
+    column-gap: 3rem;
+  }
+
+  .post-page-shell .cat-sidebar {
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
   }
 }

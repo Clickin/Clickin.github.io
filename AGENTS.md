@@ -26,7 +26,7 @@ This repository uses `pnpm` only.
 This is an **Astro 7 static blog** deployed to GitHub Pages via `/.github/workflows/deploy-pages.yml`. The build pipeline is:
 
 1. `prebuild` — `scripts/copy-post-assets.mjs` copies all non-MDX files from `src/content/posts/<slug>/` → `public/posts/<slug>/`
-2. `astro build` — generates static HTML; MDX is processed with Sätteri plugins to render Mermaid and rewrite relative image/asset URLs to `/posts/<slug>/...`
+2. `astro build` — generates static HTML; MDX is processed with Sätteri plugins to render D2 diagrams and rewrite relative image/asset URLs to `/posts/<slug>/...`
 3. `postbuild` — `pagefind` indexes `dist/` for client-side search
 
 ### Content model (`src/content.config.ts`)
@@ -48,6 +48,16 @@ Posts live in `src/content/posts/YYYY-MM-DD-slug/index.mdx`. Frontmatter fields:
 | `canonical` | url | optional canonical URL override |
 
 Co-located assets (images, PDFs, etc.) in the post folder are served at `/posts/<slug>/<filename>` and can be referenced with relative paths in MDX.
+
+### Diagrams
+
+- Diagrams in Markdown and MDX MUST be authored as fenced `d2` code blocks. NEVER hand-write box-drawing ASCII art or use Mermaid.
+- Use regular fenced `d2` blocks only when spatial structure adds information: cycles, branches, parallel paths, grouping, architecture, state transitions, or resource relationships.
+- Simple linear flows MUST use a fenced `text` block with a short sequence or list instead of D2. A top-to-bottom chain of boxes is not a useful diagram.
+- EventLoop diagrams MUST model the recurring event cycle rather than present EventLoop as one step in a pipeline. Use a circular EventLoop node and show the completion or next-event path returning to it.
+- Keep D2 source simple and semantic: stable ASCII identifiers, explicit directions or connections, and short descriptive labels. Explain operational details in the surrounding Korean prose.
+- Regular command output and other non-diagram text examples MAY remain fenced as `text`.
+- `scripts/remark-render-diagram.mjs` renders both D2 ASCII and SVG output during the Astro build.
 
 ### Key files
 
