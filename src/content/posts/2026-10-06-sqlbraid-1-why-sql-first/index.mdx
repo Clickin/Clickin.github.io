@@ -1,0 +1,222 @@
+---
+title: "SQLBraid 개발 노트 1: SQL을 직접 쓰는 TypeScript 도구를 만든 이유"
+description: "SQL 원문을 그대로 쓰면서 값 바인딩, 동적 조건, 결과 선언, 연결과 트랜잭션 수명을 라이브러리가 어디까지 맡아야 하는지 정리한 SQLBraid 개발기입니다."
+date: 2026-10-06
+category: "Project > SQLBraid"
+tags: ["SQLBraid", "TypeScript", "SQL", "MyBatis", "PostgreSQL", "tagged template"]
+series: "SQLBraid 개발 노트"
+order: 1
+draft: true
+publish: false
+---
+
+[SQLBraid](https://github.com/Clickin/SQLBraid)는 TypeScript에서 SQL을 직접 쓰기 위한 data-access toolkit입니다. SQL은 작성자가 쓰고, 라이브러리는 그 SQL을 driver에 안전하게 넘기고 결과와 연결을 정리하는 쪽을 맡습니다. PostgreSQL, MySQL, MariaDB, SQLite, Oracle, SQL Server용 adapter가 있고 npm에는 `sqlbraid`로 올라가 있습니다.
+
+이 글에서는 기능 목록 대신 질문 하나를 따라가 보겠습니다. **SQL 원문을 유지하면서 라이브러리가 맡아야 할 일은 무엇인가?** 처음 만들려던 것과 지금 SQLBraid가 맡는 일은 꽤 다릅니다. 그 사이에서 무엇을 빼고 무엇을 더했는지, 그리고 비슷한 도구와는 어디서 다른 선택을 했는지 정리합니다.
+
+---
+
+## SQL을 직접 쓰면 남는 일
+
+상품 검색 쿼리 하나로 시작하겠습니다. 검색어와 최대 가격은 둘 다 선택 조건입니다.
+
+`pg`를 그대로 쓰면 대략 이런 코드가 됩니다.
+
+```ts
+interface ProductRow {
+  id: string;
+  name: string;
+  price: string;
+}
+
+async function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
+  const where: string[] = [];
+  const values: unknown[] = [];
+
+  if (filter.keyword != null) {
+    values.push(`%${filter.keyword}%`);
+    where.push(`name ILIKE $${values.length}`);
+  }
+  if (filter.maxPrice != null) {
+    values.push(filter.maxPrice);
+    where.push(`price <= $${values.length}`);
+  }
+
+  const text = `
+    SELECT id, name, price
+    FROM products
+    ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+    ORDER BY id`;
+
+  const { rows } = await pool.query<ProductRow>(text, values);
+  return rows;
+}
+```
+
+이 코드는 잘 동작하고, 값도 parameter로 넘어갑니다. 쿼리가 몇 개 안 되고 PostgreSQL만 쓴다면 이 정도로 충분합니다. 새 라이브러리를 들일 이유가 없는 경우도 많습니다.
+
+다만 조건이 늘어나면 몇 가지 일이 코드 곳곳에 남습니다.
+
+- **SQL 구조가 흩어집니다.** 실제로 실행되는 SQL은 배열 두 개와 문자열 조립 결과를 머릿속에서 합쳐야 보입니다.
+- **placeholder 번호를 직접 맞춥니다.** `$${values.length}`는 PostgreSQL 문법입니다. MySQL이면 `?`, Oracle이면 `:1`로 바꿔야 합니다.
+- **`ProductRow`는 선언일 뿐입니다.** `pool.query<ProductRow>`의 generic은 결과가 그 모양이라고 믿겠다는 표시이고, 아무것도 검사하지 않습니다.
+- **연결 수명이 보이지 않습니다.** `pool.query`는 매번 다른 물리 연결을 쓸 수 있습니다. 트랜잭션을 걸려면 `pool.connect()`로 client를 꺼내고 `BEGIN`/`COMMIT`/`release()`를 직접 짝지어야 합니다.
+
+SQLBraid는 이 네 가지를 라이브러리 쪽으로 옮기되, SQL 자체는 건드리지 않는 것을 목표로 했습니다.
+
+---
+
+## MyBatis의 동적 SQL을 TypeScript 안으로 가져오기
+
+출발점은 MyBatis였습니다. 처음 개발을 시작할 때 남긴 요청은 이랬습니다.
+
+> @PLAN.md 에 따라서, mybatis 에서 영감을 받은 ts tagged literal 기반 type safe sql builder 를 개발해주세요.
+
+MyBatis 3 mapper의 동적 SQL은 `<if>`, `<where>`, `<set>` 같은 태그를 SQL 사이에 끼워 넣습니다.[^mybatis] `<where>`는 안쪽 조건이 하나라도 남으면 `WHERE`를 붙이고 맨 앞의 `AND`/`OR`를 지웁니다. 조건이 몇 개든 SQL은 위에서 아래로 읽힙니다. 이 읽기 방식을 가져오고 싶었고, XML과 OGNL 대신 TypeScript tagged template 안에서 쓰기로 했습니다.
+
+같은 검색 쿼리를 SQLBraid로 쓰면 이렇습니다.
+
+```ts
+import { createPgPoolDatabase, sql } from "sqlbraid/pg";
+
+const db = createPgPoolDatabase(pool);
+
+function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
+  return sql.rows<ProductRow>`
+    SELECT id, name, price
+    FROM products
+    /*@braid where*/
+      /*@braid if ${filter.keyword != null}*/
+        AND name ILIKE ${"%" + filter.keyword + "%"}
+      /*@braid end*/
+      /*@braid if ${filter.maxPrice != null}*/
+        AND price <= ${filter.maxPrice}
+      /*@braid end*/
+    /*@braid end*/
+    ORDER BY id
+  `;
+}
+
+const rows = await db.all(searchProducts({ keyword: "lamp", maxPrice: 30000 }));
+```
+
+directive는 SQL 주석 형태라서, 주석을 지우면 평범한 SQL이 남습니다. `{ keyword: "lamp" }`만 넘기면 PostgreSQL에는 이런 SQL이 갑니다.
+
+```sql
+SELECT id, name, price
+FROM products
+WHERE name ILIKE $1
+ORDER BY id
+```
+
+`$1` 자리의 값 `"%lamp%"`는 SQL 문자열에 들어가지 않고 driver에 별도 parameter로 넘어갑니다. **일반 `${value}`는 언제나 값 바인딩입니다.** JavaScript 문자열 보간처럼 보이지만 SQL 텍스트에 이어 붙이는 동작이 아닙니다. `${"x' OR '1'='1"}`을 넘겨도 그 문자열은 그냥 비교할 값 하나로 취급됩니다. placeholder를 `$1`로 쓸지 `?`로 쓸지는 SQLBraid의 driver adapter가 정합니다.
+
+반대로 컬럼 이름이나 정렬 방향처럼 **SQL 구조**를 바꾸는 값은 보간으로 넣을 수 없습니다. `sql.ident(name)`, `sql.fragment`, `sql.list`, `sql.join` 같은 helper를 명시적으로 써야 합니다. `sql.raw(text)`는 문자열을 그대로 SQL에 넣는 탈출구입니다. 이름대로 외부 입력을 넣으면 SQL injection이 그대로 가능하므로, 코드에 고정된 신뢰할 수 있는 문자열에만 씁니다.
+
+처음 쓰는 사람이 놓치기 쉬운 점이 하나 더 있습니다. tagged template은 tag 함수가 호출되기 전에 모든 `${...}`를 먼저 평가합니다. 위 예제에서 `keyword`가 없으면 `"%" + filter.keyword + "%"`는 `"%undefined%"`로 평가된 뒤 버려집니다. 값이 쓰이지 않으니 결과는 맞지만, 분기 안에서 `${user.name}`처럼 `user`가 `null`일 수 있는 식을 쓰면 비활성 분기라도 `TypeError`가 납니다. 비활성 분기의 식을 아예 평가하지 않으려면 선택 패키지인 `@sqlbraid/compiler`로 소스를 변환해야 합니다. 이 변환 없이 쓴다면 분기 안의 식은 조건과 상관없이 실행돼도 안전하게 써야 합니다.
+
+---
+
+## 결과 타입을 어디까지 책임질 것인가
+
+처음 요청에는 "type safe sql builder"라는 말이 들어 있었습니다. 초기 구현은 그 말을 넓게 받아들여, SQL을 파싱해서 결과 타입을 추론하는 방향으로 갔습니다. 이후 9월 12일부터 적용한 product-pivot 계획에는 당시 구현이 이렇게 기록돼 있습니다.
+
+> `@sqlbraid/compiler` still depends directly on `@sqlbraid/ast` and `@sqlbraid/schema` and performs SQL parsing, schema-driven row inference, SQL-driven bind inference, semantic contract comparison, and structural analysis.
+
+같은 계획은 방향을 바꾸는 이유를 SQL 예제로 적었습니다.
+
+> SQLBraid must not need to understand expressions such as:
+>
+> ```sql
+> custom_company_function(...)
+> jsonb_path_query(...)
+> vendor_extension(...)
+> ```
+>
+> before the query can be typed using an explicit application contract.
+
+임의 SQL의 결과 타입을 추론하려면 사용자 정의 함수, extension, DB별 연산자와 형 변환 규칙을 SQLBraid가 알아야 합니다. 계획은 이 부분을 핵심 가치에서 빼고 "SQL semantics belong to the database"라고 정리했습니다. 이틀 뒤에는 제가 작업 지시에 범위를 더 직접적으로 적었습니다.
+
+> 우리는 parameter binder 역할이지, query builder 역할이 아니므로 각 db의 특수 문법이 지원되는지 여부는 우리가 검증할 영역이 아닙니다.
+
+같은 지시에서 대신 검증할 대상으로 driver의 input/output 매핑을 꼽았습니다. SQL 문법을 검증하지 않는 대신, 값이 driver로 제대로 들어가고 결과가 제대로 나오는지를 복잡한 native SQL로 확인하자는 것이었습니다.
+
+그래서 지금의 `sql.rows<ProductRow>`는 **사용자의 선언**입니다. SQLBraid가 SELECT 목록을 읽고 `ProductRow`가 맞다고 증명한 결과가 아닙니다. SQL과 행 타입이 맞는지는 작성자가 책임집니다. 실제 데이터를 검사하고 싶다면 [Standard Schema](https://standard-schema.dev/)를 구현한 schema(Zod 등)를 붙입니다.
+
+```ts
+const ProductSchema = z.object({ id: z.string(), name: z.string(), price: z.string() });
+
+// 행마다 schema 검증과 변환을 거칩니다
+const checked = await db.all(sql.rows(ProductSchema)`SELECT id, name, price FROM products`);
+```
+
+선언(`sql.rows<T>`)과 runtime 검증(`sql.rows(schema)`)은 API에서도 구분돼 있습니다. 둘 다 SQL이 DB에서 의미상 올바른지는 확인하지 않습니다. 그건 DB가 실행하면서 판단합니다.
+
+SQL을 전혀 읽지 않는 것은 아닙니다. directive를 찾고, 주석과 문자열 리터럴을 구분하고, 구조와 값을 나누려면 DB별 lexical 규칙(주석 문법, dollar quote 등)은 알아야 합니다. 빠진 것은 전체 SQL parser와 의미 분석입니다. 저장소 규칙에도 "complete SQL grammars, function catalogs, operator or coercion systems, or arbitrary SQL-to-TypeScript inference"를 다시 넣지 말라고 적어 두었습니다.
+
+---
+
+## 개발하면서 책임 범위가 구체화됐다
+
+SQL 의미 분석을 내려놓으면 라이브러리가 할 일은 바인딩 정도만 남을 것 같았습니다. 실제로는 반대 방향의 일이 늘었습니다. 연결을 언제 잡고 놓는지, 트랜잭션이 정말 커밋됐는지, 숫자가 손실 없이 왔는지 같은 문제입니다. driver마다 동작이 다르고, 사용자가 일일이 확인하기 어렵다는 점은 같았습니다.
+
+대표적인 사례가 PostgreSQL의 COMMIT 응답입니다.
+
+```ts
+await db.tx(async (tx) => {
+  await tx.execute(sql.command`INSERT INTO audit (note) VALUES (${"first"})`);
+  try {
+    await tx.execute(sql.command`INSERT INTO missing_table VALUES (1)`);
+  } catch {
+    // 실패를 잡고 계속 진행
+  }
+  return "ok";
+});
+```
+
+두 번째 INSERT가 실패하면 PostgreSQL 트랜잭션은 aborted 상태가 됩니다. callback은 예외를 잡았으니 정상 반환하고, 라이브러리는 `COMMIT`을 보냅니다. 이때 서버는 오류를 내지 않습니다. `COMMIT` 호출은 성공한 것처럼 끝나고, 응답의 command tag만 `ROLLBACK`입니다. `pg`로 직접 실행해 보면 `COMMIT`의 결과 객체에 `command: "ROLLBACK"`이 들어 있습니다. 첫 번째 INSERT는 저장되지 않았습니다.
+
+호출이 예외 없이 끝났다고 커밋에 성공한 것은 아니었습니다. 그래서 PostgreSQL adapter는 COMMIT 응답의 실제 command를 확인하고, `ROLLBACK`이면 `db.tx()`를 실패로 끝냅니다. 위 코드는 `"ok"`를 반환하지 않고 오류를 던집니다.
+
+숫자 표현도 비슷한 문제였습니다. PostgreSQL `bigint` 값 `9007199254740993`을 JavaScript `number`로 받으면 `9007199254740992`가 됩니다. SQLBraid는 정확한 정수와 decimal을 문자열로 돌려주는 쪽을 택했고, 예제의 `price`가 `string`인 것도 그 때문입니다. 이 정책이 driver와 profile마다 어디까지 지켜지는지, 트랜잭션 실패 뒤의 연결은 어떻게 처리하는지는 다음 글에서 실행 경로를 따라가며 다룹니다.
+
+---
+
+## 이미 있는 도구와 선택이 다른 지점
+
+tagged template으로 SQL을 쓰는 방식은 SQLBraid가 처음 만든 것이 아닙니다. 여기서는 SQL을 쓰는 방식과 결과 타입이 어디서 오는지를 기준으로 가까운 도구 두 개와 비교합니다.
+
+**Slonik**[^slonik]은 SQLBraid와 가장 가까운 사례입니다. 스스로를 "Node.js PostgreSQL client with strict types, detailed logging and assertions"라고 소개하고, 원칙으로 "Promotes writing raw SQL"을 둡니다. 값 바인딩, `sql.identifier`/`sql.join` 같은 구조 helper, Zod를 이용한 runtime 결과 검증(`sql.type`), `pool.connect()` callback 범위로 연결을 묶는 방식, savepoint 기반 트랜잭션 중첩까지 SQLBraid와 겹치는 부분이 많습니다.
+
+차이는 세 가지입니다. Slonik은 PostgreSQL 전용입니다. 또 "Discourages ad-hoc dynamic generation of SQL"을 원칙으로 두고 있어서, SQL 안에 조건 분기를 쓰는 MyBatis식 동적 SQL과는 방향이 다릅니다. 마지막으로 Slonik은 트랜잭션과 쿼리 재시도를 기능으로 제공하지만, SQLBraid는 재시도와 라우팅을 하지 않습니다. 실패를 그대로 돌려주고 판단은 애플리케이션에 맡깁니다. PostgreSQL만 쓰고 동적 SQL이 적다면 Slonik이 더 잘 맞을 수 있습니다.
+
+**Kysely**[^kysely]는 "type-safe and autocompletion-friendly TypeScript SQL query builder"입니다. `Database` interface로 테이블 구조를 선언하면, fluent API로 쓴 쿼리에서 선택한 컬럼과 alias를 따라 결과 타입이 만들어집니다. raw SQL용 `sql` tag도 있습니다. PostgreSQL, MySQL, SQL Server, SQLite를 core dialect로 지원합니다.
+
+| | SQL을 쓰는 방식 | 결과 타입의 출처 |
+|---|---|---|
+| Slonik | SQL 원문 + tagged template | 선언, 또는 Zod schema |
+| Kysely | builder API (raw `sql` tag 병행) | schema 선언 + builder 구조에서 추론 |
+| SQLBraid | SQL 원문 + tagged template + 주석 directive | 선언, 또는 Standard Schema |
+
+Kysely에서는 쿼리를 builder로 다시 표현하는 대가로 결과 타입을 얻습니다. SQLBraid는 SQL을 그대로 두는 대신 결과 타입을 사용자가 선언합니다. builder로 표현하기 어려운 DB 고유 문법을 자주 쓰거나, SQL을 DBA와 그대로 주고받아야 한다면 SQLBraid 쪽이 맞습니다. 테이블 구조를 기준으로 컴파일 시점에 컬럼 오타까지 잡고 싶다면 Kysely 쪽이 맞습니다.
+
+---
+
+## 어떤 경우에 사용할 것인가
+
+SQLBraid가 맞는 경우는 이렇습니다.
+
+- SQL을 직접 쓰고, DB 고유 문법과 기능을 그대로 쓰고 싶다.
+- 조건이 많은 동적 SQL을 SQL 모양 그대로 읽고 싶다.
+- 여러 DB나 driver에서 같은 바인딩 규칙, 같은 결과 선언 방식, 같은 트랜잭션·스트림 API를 쓰고 싶다.
+- 결과 타입은 직접 선언하고, 필요한 곳에만 runtime 검증을 붙여도 괜찮다.
+
+반대로 임의 SELECT의 결과 타입을 자동으로 추론받고 싶거나, 관계를 따라 객체 그래프를 채워 주는 ORM이 필요하다면 다른 도구가 맞습니다.
+
+남는 한계도 분명합니다. SQLBraid의 공개 API는 하나지만, 기능 지원은 DB·driver·runtime 조합마다 다릅니다. 어떤 adapter는 streaming이나 취소를 지원하지 않고, 지원하지 않는 기능은 흉내 내지 않고 오류로 거부합니다. 정확한 범위는 [지원 매트릭스](https://clickin.github.io/SQLBraid/latest/reference/support/)와 [현재 한계](https://clickin.github.io/SQLBraid/latest/release/limitations/) 문서에 조합별로 기록해 두었습니다. 그리고 SQL이 의미상 올바른지, 선언한 행 타입이 SQL과 맞는지는 여전히 DB와 작성자의 몫입니다.
+
+[다음 글](/blog/2026-10-06-sqlbraid-2-execution-path/)에서는 이 글의 검색 쿼리 하나가 값과 구조로 나뉘고, driver 요청으로 바뀌고, 물리 연결을 잡았다가 놓기까지의 경로를 코드로 따라갑니다.
+
+[^mybatis]: MyBatis 3, "Dynamic SQL" — `if`, `choose`, `where`, `set`, `trim`, `foreach`. https://mybatis.org/mybatis-3/dynamic-sql.html
+[^slonik]: Slonik README — "A battle-tested Node.js PostgreSQL client with strict types, detailed logging and assertions.", Principles: "Promotes writing raw SQL.", "Discourages ad-hoc dynamic generation of SQL." https://github.com/gajus/slonik
+[^kysely]: Kysely, "Introduction" — "Kysely (pronounced “Key-Seh-Lee”) is a type-safe and autocompletion-friendly TypeScript SQL query builder." https://kysely.dev/docs/intro, 지원 dialect는 https://kysely.dev/docs/dialects
