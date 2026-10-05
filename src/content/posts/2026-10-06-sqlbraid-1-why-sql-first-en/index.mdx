@@ -1,0 +1,223 @@
+---
+title: "SQLBraid Dev Notes 1: Why I Built a SQL-First Toolkit for TypeScript"
+description: "SQLBraid lets you write plain SQL in TypeScript and handles only what a library should: parameter binding, readable dynamic SQL and optional result validation. Here is why I chose that boundary over an ORM or a query builder."
+date: 2026-10-06
+category: "Project > SQLBraid"
+tags: ["SQLBraid", "SQL", "TypeScript", "MyBatis", "Dynamic SQL", "PostgreSQL", "English"]
+series: "SQLBraid Dev Notes"
+order: 1
+draft: true
+publish: false
+---
+
+> 한국어: [SQLBraid 개발 노트 1: SQL을 직접 쓰는 TypeScript 도구를 만든 이유](/blog/2026-10-06-sqlbraid-1-why-sql-first/)
+
+[SQLBraid](https://github.com/Clickin/SQLBraid) is a data-access toolkit for people who would rather write SQL than describe it. You write the query. SQLBraid turns every interpolated value into a bound parameter, lets you switch parts of the query on and off without leaving SQL, and can validate the rows that come back. It is not an ORM, and it is not a query builder.
+
+```ts
+import pg from "pg";
+import { createPgPoolDatabase, sql } from "sqlbraid/pg";
+
+interface UserRow {
+  id: string;
+  name: string;
+}
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const db = createPgPoolDatabase(pool);
+
+const userId = 1;
+const users = await db.all(sql.rows<UserRow>`
+  SELECT id, name FROM users WHERE id = ${userId}
+`);
+```
+
+This series covers v1.0.2. This first post explains why SQLBraid keeps SQL in plain sight and what the library takes on in exchange. [Part 2](/blog/2026-10-06-sqlbraid-2-execution-path-en/) follows a single query from parameter binding all the way to the connection going back to the pool.
+
+## It started with MyBatis
+
+I spent most of my career on Java backends, and most of that time I wrote SQL with [MyBatis](https://mybatis.org/mybatis-3/dynamic-sql.html). If you haven't used it: MyBatis is the opposite of an ORM. Your SQL stays SQL. The framework binds values with `#{}` placeholders and assembles conditional SQL with XML tags like `<if>`, `<where>` and `<set>`. A DBA can read your queries, and when you need an execution plan you copy the SQL straight into a console.
+
+When I moved to TypeScript, the options split roughly two ways:
+
+- An ORM models tables as objects and generates the SQL for you.
+- A query builder such as [Kysely](https://github.com/kysely-org/kysely) moves SQL structure into a TypeScript method chain and gets type safety in return.
+
+Both are good tools. But if you already think in SQL, they add a translation step. You turn the query in your head into method calls, then check that the generated SQL is what you meant. And the moment you need a database-specific feature, you reach for the raw-SQL escape hatch anyway.
+
+My first goal for SQLBraid was "MyBatis-style dynamic SQL for TypeScript". As the project took shape I narrowed it. SQLBraid shouldn't own your SQL. It should be closer to a binder that ties SQL, values and connections together. That left three jobs for the library:
+
+1. Keep SQL structure and values apart, and bind the values.
+2. Express conditional SQL without breaking SQL syntax.
+3. Own the lifetime of physical resources: connections, transactions and streams.
+
+The third job is the subject of Part 2. This post covers the first two.
+
+## Interpolation always means a value
+
+The most important rule in SQLBraid is that `${...}` always becomes a bound parameter. Values are never spliced into the SQL text.
+
+```ts
+const name = "'; DROP TABLE users; --";
+const query = sql.rows<{ id: string }>`SELECT id FROM users WHERE name = ${name}`;
+```
+
+The `sql` tag doesn't run anything here, and it doesn't pick a placeholder style either. What it produces is a list of SQL segments and a list of parameters. When the pg adapter turns that into PostgreSQL syntax, you get:
+
+```text
+SQL:    SELECT id FROM users WHERE name = $1
+values: ["'; DROP TABLE users; --"]
+```
+
+The attack string never touches the SQL text. It travels as an ordinary value. This separation is enforced as an internal invariant:
+
+```text
+segments.length === parameters.length + 1
+```
+
+There is always exactly one more SQL segment than there are parameters, and a rendered parameter is always a value. It can't be an identifier, a nested query or a placeholder string. Because of that, the driver adapter alone decides whether a placeholder is `$1`, `?`, `:1` or `@p1`, and the same query model works on PostgreSQL, MySQL, Oracle and SQL Server.
+
+### Structure goes through named helpers
+
+Sometimes you do need structure rather than a value: a table name, a sort column, a list for `IN`. For those, SQLBraid has explicit helpers instead of plain interpolation.
+
+```ts
+const sortColumn = "name";
+const ids = ["1", "2", "3"];
+
+const query = sql.rows<UserRow>`
+  SELECT id, name FROM users
+  WHERE id IN (${sql.list(ids)})
+  ORDER BY ${sql.ident(sortColumn)}
+`;
+```
+
+```text
+SELECT id, name FROM users
+WHERE id IN ($1, $2, $3)
+ORDER BY "name"
+```
+
+`sql.ident` quotes an identifier using the dialect's rules, and `sql.list` expands a list into one bound parameter per item. `sql.fragment` and `sql.join` compose larger pieces. There is also `sql.raw`, which inserts trusted SQL text unchanged. It is a deliberate escape hatch, and the name is the point: search a code review for `sql.raw` and you've found every place where structure comes from a string.
+
+## Dynamic SQL lives in SQL comments
+
+In MyBatis, dynamic SQL is XML:
+
+```xml
+<select id="findUsers" resultType="User">
+  SELECT id, name FROM users
+  <where>
+    <if test="name != null">AND name = #{name}</if>
+    <if test="status != null">AND status = #{status}</if>
+  </where>
+</select>
+```
+
+SQLBraid writes the same thing as SQL block comments:
+
+```ts
+function findUsers(name?: string, status?: string) {
+  return sql.rows<UserRow>`
+    SELECT id, name FROM users
+    /*@braid where*/
+      /*@braid if ${name != null}*/ AND name = ${name} /*@braid end*/
+      /*@braid if ${status != null}*/ AND status = ${status} /*@braid end*/
+    /*@braid end*/
+  `;
+}
+```
+
+`findUsers("Ada")` renders as:
+
+```text
+SELECT id, name FROM users
+WHERE name = $1
+```
+
+Like MyBatis's `<where>`, the `where` directive strips a leading `AND` or `OR`, and drops the `WHERE` keyword entirely when no condition is left. In an `UPDATE`, `set` trims the trailing comma. The full set of directives is `if`, `choose`, `when`, `otherwise`, `where`, `set` and `trim`.
+
+I chose comments so that SQL tooling keeps working. Strip the directives and what's left is SQL, and to any SQL editor or formatter `/*...*/` is just a comment. There is no new template language to learn.
+
+### The catch: skipped branches still evaluate
+
+JavaScript tagged templates have one limitation that matters here. Every `${...}` expression is evaluated before the tag function even runs, so expressions inside a branch whose condition is false still execute.
+
+```ts
+function searchUsers(keyword?: string) {
+  return sql.rows<UserRow>`
+    SELECT id, name FROM users
+    /*@braid where*/
+      /*@braid if ${keyword != null}*/
+        AND name LIKE ${"%" + keyword + "%"}
+      /*@braid end*/
+    /*@braid end*/
+  `;
+}
+```
+
+When `keyword` is `undefined`, the rendered SQL has no `LIKE` clause, but `"%" + keyword + "%"` has already been computed as `"%undefined%"`. The value is discarded, so the query is still correct. But if the expression were `${user.name}` and `user` were missing, you'd get a `TypeError` from a branch that was switched off.
+
+A runtime library can't fix that, so SQLBraid ships an optional build step: `@sqlbraid/compiler`, or `@sqlbraid/vite` if you use Vite. The compiler finds templates that contain `@braid` directives and lowers them so that expressions inside a branch are evaluated only when its condition is true. Here is the relevant part of its output for the function above:
+
+```js
+if (__sqlbraidAssertCondition(__sqlbraidRead(0, () => keyword != null))) {
+    __sqlbraidRead(1, () => "%" + keyword + "%");
+}
+```
+
+The condition and the branch value are each wrapped in a thunk, and the second one only runs when the condition holds. The compiler handles these directives and nothing else. It does not parse or optimize your SQL.
+
+## A result type is not result validation
+
+The type argument in `sql.rows<UserRow>` tells TypeScript what the rows look like. It doesn't check anything at runtime. If you want to verify what the database actually returns, pass a schema that implements [Standard Schema](https://standard-schema.dev/), such as Zod, Valibot or ArkType.
+
+```ts
+import { z } from "zod";
+
+const User = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+
+// Compile-time type only
+const rows = await db.all(sql.rows<UserRow>`SELECT id, name FROM users`);
+
+// Runtime validation and transformation
+const user = await db.one(sql.rows(User)`SELECT id, name FROM users WHERE id = ${userId}`);
+```
+
+This also explains why `id` is a `string`. SQLBraid returns integers and decimals as exact strings and only floating-point values as JavaScript numbers. If a PostgreSQL `bigint` column holds `9007199254740993`, you get the string `"9007199254740993"`. Pass that through `Number` and it becomes `9007199254740992`. Rather than silently hand you the wrong number, SQLBraid leaves the conversion to your schema, where it's visible.
+
+## What SQLBraid deliberately doesn't do
+
+Keeping SQL as SQL means some things are out of scope on purpose:
+
+- It doesn't parse arbitrary SQL to infer result types.
+- It doesn't implement a connection pool. You pass in your driver's pool, such as `pg.Pool`.
+- It doesn't retry queries or route them to other connections.
+- It doesn't fake features a driver lacks. Call `db.stream()` on libSQL or Cloudflare D1, which have no row-cursor API, and you get `BRAID_STREAM_UNSUPPORTED`, not a buffered result pretending to be a stream.
+
+Here is how it sits next to similar tools, based on each project's official README:
+
+| | How you write queries | Dynamic SQL | Databases |
+|---|---|---|---|
+| ORMs | Generated from models | ORM API | Many |
+| [Kysely](https://github.com/kysely-org/kysely) | TypeScript query builder | Conditionals in a method chain | Many |
+| [Slonik](https://github.com/gajus/slonik) | SQL tagged templates | Composing fragments | PostgreSQL |
+| SQLBraid | SQL tagged templates | Directives in SQL comments | Many databases and drivers |
+
+Supported targets are PostgreSQL (`pg`), MySQL (`mysql2`), MariaDB, SQLite (`node:sqlite`, `better-sqlite3`, `@libsql/client`, SQLite WASM and Cloudflare D1), Oracle (`oracledb`), SQL Server (`tedious`) and Bun.SQL. Support isn't claimed as a blanket "works with PostgreSQL". The [support matrix](https://clickin.github.io/SQLBraid/latest/reference/support/) records it per combination of database, driver, runtime and feature.
+
+## Getting started
+
+```sh
+npm install sqlbraid pg
+```
+
+Each driver has its own import path, such as `sqlbraid/pg`, `sqlbraid/mysql2` or `sqlbraid/node-sqlite`. The quickest way to try it without setting up a database is the [`node:sqlite` quick start](https://clickin.github.io/SQLBraid/latest/getting-started/sqlite/), which needs Node.js 22.18 or later. Beyond the runtime there is a CLI, a codegen tool that builds TypeScript models from database metadata, a VS Code extension and an OpenTelemetry integration.
+
+So SQLBraid doesn't write SQL for you. It guards the line between values and structure in the SQL you write, and lets you express conditional SQL as SQL. Which raises the question: what's the hard part left for the library? It's outside the SQL, in the lifetime of connections and transactions. That's [Part 2](/blog/2026-10-06-sqlbraid-2-execution-path-en/).
+
+- Repository: [github.com/Clickin/SQLBraid](https://github.com/Clickin/SQLBraid)
+- Documentation: [clickin.github.io/SQLBraid](https://clickin.github.io/SQLBraid/latest/)

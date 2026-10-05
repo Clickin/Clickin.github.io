@@ -1,0 +1,232 @@
+---
+title: "SQLBraid Dev Notes 2: One Query's Path, from Value Binding to Connection Release"
+description: "Follow a single db.all() call through rendering, binding, connection checkout, driver I/O, release and result validation, and see how the SQLBraid runtime protects the lifetime of connections and transactions."
+date: 2026-10-06
+category: "Project > SQLBraid"
+tags: ["SQLBraid", "SQL", "TypeScript", "PostgreSQL", "Transaction", "Connection Pool", "English"]
+series: "SQLBraid Dev Notes"
+order: 2
+draft: true
+publish: false
+---
+
+> 한국어: [SQLBraid 개발 노트 2: 값 바인딩부터 연결 해제까지, 쿼리 하나의 실행 경로](/blog/2026-10-06-sqlbraid-2-execution-path/)
+
+In [Part 1](/blog/2026-10-06-sqlbraid-1-why-sql-first-en/) I said SQLBraid leaves your SQL alone and only guards the line between values and structure. So where does the rest of the code go? Most of the SQLBraid runtime isn't about SQL at all. It's about who owns a physical resource (a connection, a transaction, a cursor) and for how long.
+
+This post follows one `db.all()` call from start to finish and looks at the rule SQLBraid enforces at each step. Every example was run against SQLBraid v1.0.2, PostgreSQL 16 and `pg` 8.23.0, and the output shown is what actually came back.
+
+## The whole path
+
+A pooled `db.all(query)` runs in the order below. The point to notice is how short the window is in which a connection is checked out: just the driver I/O.
+
+| Step | What happens | Connection |
+|---|---|---|
+| `render()` | Build SQL segments and the value list | None |
+| `binding.describe()` | Build `$1` placeholder SQL | None |
+| Acquire | Take a lease from the pool | Checked out |
+| Driver I/O | Run the query, receive rows | Checked out |
+| Release | Return the lease to the pool | Returned |
+| Result-kind check | Confirm rows/command is what was expected | None |
+| Validation | Standard Schema validation and transformation | None |
+
+## Before checkout: rendering and binding
+
+A `Query` built by the `sql` tag isn't physical SQL yet. `render()` produces SQL segments and a list of values, and the driver adapter's `StatementBindingAdapter` turns those into whatever the driver expects. For the pg adapter:
+
+```ts
+const query = sql.rows<UserRow>`SELECT id, name FROM users WHERE id = ${1} AND name = ${"Ada"}`;
+```
+
+```text
+parameterizedSql: SELECT id, name FROM users WHERE id = $1 AND name = $2
+transport:        text-positional
+reuse:            { requested: "auto", effective: "simple", owner: "driver" }
+```
+
+The MySQL adapter would emit `?`, Oracle `:1` and SQL Server `@p1`. The query model is the same everywhere. Only the placeholder syntax belongs to the adapter.
+
+This step is a pure function, and it runs before any connection is acquired. An unsupported binding hint or a malformed parameter fails right here, so a query that was never going to work never ties up a pooled connection.
+
+### `prepare` doesn't promise a server-side cache
+
+`db.prepare()` also does its work at this stage. The name suggests a server-side prepared statement, but what SQLBraid actually promises is that the query's logical shape is locked. The first execution fixes the result kind, the SQL segments and the parameter order. After that, only the values may change.
+
+```ts
+const byName = db.prepare("users-by-name", (name: string | null) => sql.rows<{ id: string }>`
+  SELECT id FROM users
+  /*@braid where*/
+    /*@braid if ${name != null}*/ AND name = ${name} /*@braid end*/
+  /*@braid end*/
+`);
+
+await byName.all("Ada");     // [{ id: "1" }], shape is now locked
+await byName.all(null);      // BRAID_PREPARED_SHAPE
+```
+
+On the second call the dynamic branch drops the `WHERE` clause, which changes the SQL structure, so SQLBraid rejects it with `BRAID_PREPARED_SHAPE` before any driver I/O. Whether the server really reuses a statement is something the adapter reports separately. That's the `effective: "simple"` you saw from the pg adapter above. SQLBraid won't claim reuse a driver doesn't provide.
+
+## The connection goes back before validation
+
+Once the driver I/O is done and the rows are in memory, SQLBraid returns the connection to the pool before running Standard Schema validation. You can see this by logging pool state from inside an async schema:
+
+```ts
+const pool = new pg.Pool({ max: 4 /* ... */ });
+const db = createPgPoolDatabase(pool);
+
+const User = z
+  .object({ id: z.string(), name: z.string() })
+  .transform(async (row) => {
+    console.log(`total=${pool.totalCount} idle=${pool.idleCount}`);
+    return row;
+  });
+
+await db.all(sql.rows(User)`SELECT id, name FROM users`);
+```
+
+```text
+total=1 idle=1
+```
+
+One connection was opened, and by the time the schema runs it's already idle. However slow your validation or transformation is (say, a transform that looks something up for every row), it doesn't hold a database connection. Pools are small, and application code shouldn't be what keeps them busy.
+
+## Streams keep the connection
+
+Streams are the deliberate exception. `db.stream()` is not `all()` handed out in pieces. It opens a real driver cursor (`pg-cursor` for pg), and the cursor needs its connection for as long as it lives.
+
+```ts
+for await (const row of db.stream(sql.rows<{ g: string }>`
+  SELECT g::text AS g FROM generate_series(1, 1000) g
+`)) {
+  console.log(`total=${pool.totalCount} idle=${pool.idleCount}`, row);
+  break;
+}
+console.log(`total=${pool.totalCount} idle=${pool.idleCount}`);
+```
+
+```text
+total=1 idle=0 { g: '1' }
+total=1 idle=1
+```
+
+While you iterate, the connection is checked out. When you `break`, SQLBraid closes the cursor and then returns the connection. An exception, a cancellation or a failed schema check takes the same cleanup path: driver cursor first, connection release second.
+
+As Part 1 mentioned, drivers without a row-cursor API reject `db.stream()` with `BRAID_STREAM_UNSUPPORTED`. Buffering everything and calling it a stream would quietly break every memory and connection guarantee in this section.
+
+## `session` and `tx` pin one connection
+
+Root queries sent to a pool at the same time can land on different connections. `pg_backend_pid()` shows it:
+
+```ts
+const pid = () => sql.rows<{ pid: string }>`SELECT pg_backend_pid()::text AS pid, pg_sleep(0.2)::text AS s`;
+
+await Promise.all([db.one(pid()), db.one(pid())]);
+// pids: 1304, 1305
+
+await db.session((s) => Promise.all([s.one(pid()), s.one(pid())]));
+// pids: 1305, 1305
+```
+
+`db.session()` pins one connection for the length of the callback without starting a transaction. Use it when you rely on connection-local state such as temporary tables or session variables. `db.tx()` pins one connection and runs a transaction on it. Calling `tx.tx()` inside it doesn't start a second transaction. It creates a savepoint on the same connection.
+
+```text
+db.tx(outer)       BEGIN
+  outer.tx(inner)  SAVEPOINT
+                   RELEASE SAVEPOINT  (on failure: ROLLBACK TO SAVEPOINT, then RELEASE)
+                   COMMIT
+```
+
+Transaction options such as the isolation level are accepted only on the outer transaction. A nested `tx(options, callback)` is rejected, because SQLBraid won't pretend it can change the isolation level of a transaction that has already started.
+
+## Handles that leave their scope are rejected
+
+"A transaction runs on one connection" is an easy promise to break by accident. Inside a transaction callback, use the outer `db` by mistake and that query runs on a different connection, outside the transaction. SQLBraid doesn't reroute it. It throws.
+
+```ts
+await db.tx(async (tx) => {
+  await db.all(sql.rows`SELECT 1`);     // BRAID_TX_SCOPE: used the root handle
+});
+
+let leaked: Database | undefined;
+await db.tx(async (tx) => { leaked = tx; });
+await leaked!.all(sql.rows`SELECT 1`);  // BRAID_TX_CLOSED: transaction already ended
+
+await db.tx(async (tx) => {
+  await tx.tx(async (inner) => {
+    await tx.all(sql.rows`SELECT 1`);   // BRAID_TX_SCOPE: parent handle inside a savepoint
+  });
+});
+
+await db.session(async (s) => {
+  for await (const row of s.stream(sql.rows`SELECT g FROM generate_series(1, 10) g`)) {
+    await s.all(sql.rows`SELECT 1`);    // BRAID_STREAM_SCOPE: a stream is open on this connection
+  }
+});
+```
+
+That last case behaves differently from driver to driver. Send another query on a connection with an open cursor and one driver queues it, another fails, and another ends up in an undefined state. SQLBraid rejects it up front instead of depending on whatever the driver happens to do.
+
+## When `COMMIT` doesn't commit
+
+In PostgreSQL, if any statement inside a transaction fails, the whole transaction is aborted. Send `COMMIT` in that state and you don't get an error. You get a rollback. With plain `pg`:
+
+```ts
+const client = await pool.connect();
+await client.query("BEGIN");
+try { await client.query("SELECT 1/0"); } catch {}
+const result = await client.query("COMMIT");
+console.log(result.command);
+```
+
+```text
+ROLLBACK
+```
+
+The `COMMIT` call resolved normally and nothing was thrown. Unless you check `command` on the result, you'll believe your data was committed. And this is easy to trigger from application code: catch and swallow an error inside a transaction callback.
+
+```ts
+await db.tx(async (tx) => {
+  await tx.execute(sql.command`INSERT INTO ledger VALUES (1)`);
+  try {
+    await tx.all(sql.rows`SELECT 1/0`);
+  } catch {
+    // log it and carry on
+  }
+});
+```
+
+```text
+BRAID_TX_NOT_COMMITTED: PostgreSQL COMMIT completed with ROLLBACK, not COMMIT.
+```
+
+SQLBraid's pg adapter checks the outcome of `COMMIT`, and anything other than `COMMIT` fails with `BRAID_TX_NOT_COMMITTED`. After the example above, the `ledger` table had zero rows. If `db.tx()` resolves, that has to mean the data was saved, so SQLBraid won't report success when it wasn't. The Bun.SQL PostgreSQL adapter performs the same check.
+
+## Uncertain connections get thrown away
+
+If transaction control, stream cleanup or a cancellation fails, you can no longer be sure what state the connection is in. Did the rollback actually run? Is the cursor closed? Put that connection back in the pool and the next caller inherits whatever is left.
+
+SQLBraid marks such a connection as poisoned. A pooled connection is discarded instead of being returned, and a single connection you passed in directly refuses all further work. When cleanup fails more than once, the original error is never hidden. Cleanup failures are collected and reported alongside it. Correctness wins over optimistic connection reuse.
+
+## Rules backed by tests
+
+Everything in this post is written down as an invariant in the repository's architecture guide ([mental model](https://github.com/Clickin/SQLBraid/blob/v1.0.2/docs/mental-model.md)). In short:
+
+- Ordinary interpolation is always a value bind.
+- Binding description is pure and happens before a connection is acquired.
+- Pooled materialized results release the connection before application mapping.
+- Streams hold their connection until driver cleanup finishes.
+- Sessions pin a connection without a transaction, and nested transactions are savepoints on the same connection.
+- Escaping to a root or parent handle is rejected, not rerouted.
+- Uncertain connections are poisoned or discarded.
+- Unsupported features fail explicitly instead of being emulated.
+
+The repository has contract tests for these rules, plus per-driver tests that run against real databases. Entries in the support matrix are recorded from those results.
+
+## Wrapping up
+
+SQLBraid's SQL surface is small: one tag, a few helpers and a handful of comment directives. Most of the runtime is spent on other questions. When is the connection checked out, and when does it go back? Is this handle still valid? Did the commit actually commit? For a tool where you write the SQL yourself, I think that is the library's real job.
+
+The current release is 1.0.2, and a SQL-file migration tool (`@sqlbraid/migrate`) is in the works. If you try SQLBraid and run into problems or have feedback, please open an issue on [GitHub](https://github.com/Clickin/SQLBraid).
+
+- Documentation: [clickin.github.io/SQLBraid](https://clickin.github.io/SQLBraid/latest/)
+- Support matrix: [Driver support](https://clickin.github.io/SQLBraid/latest/reference/support/)
