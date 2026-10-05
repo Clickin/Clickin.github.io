@@ -46,6 +46,7 @@ Posts live in `src/content/posts/YYYY-MM-DD-slug/index.mdx`. Frontmatter fields:
 | `series` | string | groups posts into a series nav |
 | `order` | number | sort order within a series |
 | `canonical` | url | optional canonical URL override |
+| `lang` | string | optional page language (e.g. `en`); defaults to `site.language` |
 
 Co-located assets (images, PDFs, etc.) in the post folder are served at `/posts/<slug>/<filename>` and can be referenced with relative paths in MDX.
 
