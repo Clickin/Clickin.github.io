@@ -134,11 +134,9 @@ The order is fixed too. `describe()` is a pure function and runs **before a conn
 
 ### What `db.prepare()` actually locks
 
-The `reuse` field relates to prepared statements. At one point I looked at the `db.prepare()` example in the README and asked (translated from Korean):
+The `reuse` field relates to prepared statements. Rereading the `db.prepare()` example in the README, I started to doubt this API was needed at all. Even with a plain function, the bind variables are captured from lexical scope anyway.
 
-> Does the db.prepare mentioned in @README.md and @README.ko.md mean anything? Even if you just write a plain function, the bind variables are captured from lexical scope anyway. Rethink what prepare is for.
-
-On review, a plain function produced exactly the same binding. `searchProducts()` itself is an example. What `db.prepare()` adds is a **logical shape lock**. It remembers the result kind, dialect, segments and parameter metadata from the first execution, and rejects later executions whose structure changes, before any driver I/O.
+Sure enough, a plain function produced exactly the same binding. `searchProducts()` itself is an example. So I redefined what `prepare` is for. What `db.prepare()` adds is a **logical shape lock**. It remembers the result kind, dialect, segments and parameter metadata from the first execution, and rejects later executions whose structure changes, before any driver I/O.
 
 ```ts
 const prepared = db.prepare("search", (f: ProductFilter) => searchProducts(f));

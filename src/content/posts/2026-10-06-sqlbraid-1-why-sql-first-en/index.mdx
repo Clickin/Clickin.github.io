@@ -71,9 +71,7 @@ SQLBraid's goal was to move those four chores into the library without touching 
 
 ## Bringing MyBatis-style dynamic SQL into TypeScript
 
-The starting point was MyBatis, the SQL mapper I used for years on Java backends. The request I wrote when I started development was (translated from Korean):
-
-> Following @PLAN.md, build a type-safe SQL builder based on TS tagged literals, inspired by MyBatis.
+The starting point was MyBatis, the SQL mapper I used for years on Java backends. The picture I started with was "a type-safe SQL builder on TypeScript tagged templates, inspired by MyBatis".
 
 MyBatis 3 mappers express dynamic SQL by placing tags such as `<if>`, `<where>` and `<set>` between pieces of SQL.[^mybatis] `<where>` adds `WHERE` if at least one inner condition survives, and strips a leading `AND`/`OR`. However many conditions there are, the SQL still reads top to bottom. I wanted that reading experience, but inside a TypeScript tagged template instead of XML and OGNL.
 
@@ -122,11 +120,11 @@ There's one more thing newcomers tend to miss. A tagged template evaluates every
 
 ## How far should result types go?
 
-My original request said "type-safe SQL builder". The early implementation read that broadly and went in the direction of parsing SQL to infer result types. The product-pivot plan I adopted on September 12 described the implementation at the time like this:
+The "type-safe" in that first goal was broad. The first implementation went in the direction of parsing SQL to infer result types. Building it convinced me that this wasn't where SQLBraid should go, and on September 12 I drew up a plan to change direction. The plan summed up the implementation so far like this:
 
 > `@sqlbraid/compiler` still depends directly on `@sqlbraid/ast` and `@sqlbraid/schema` and performs SQL parsing, schema-driven row inference, SQL-driven bind inference, semantic contract comparison, and structural analysis.
 
-The same plan explained the change of direction with a SQL example:
+I explained the reason for the change with a SQL example:
 
 > SQLBraid must not need to understand expressions such as:
 >
@@ -138,11 +136,9 @@ The same plan explained the change of direction with a SQL example:
 >
 > before the query can be typed using an explicit application contract.
 
-Inferring the result type of arbitrary SQL means SQLBraid would have to understand user-defined functions, extensions, and each database's operators and coercion rules. The plan took that out of the core value and summed it up as "SQL semantics belong to the database". Two days later I stated the scope even more bluntly in a work instruction (translated from Korean):
+Inferring the result type of arbitrary SQL means SQLBraid would have to understand user-defined functions, extensions, and each database's operators and coercion rules. So I took that out of the core value and set down a principle: "SQL semantics belong to the database". Two days later I made the scope even sharper. SQLBraid is a parameter binder, not a query builder, so whether each database's special syntax works is not something SQLBraid should verify.
 
-> We are a parameter binder, not a query builder, so whether each database's special syntax is supported is not ours to verify.
-
-The same instruction named what we should verify instead: the driver's input and output mapping. Rather than validating SQL syntax, we would use complex native SQL to check that values go into the driver correctly and that results come back correctly.
+What it should verify instead is the driver's input and output mapping. Rather than validating SQL syntax, SQLBraid uses complex native SQL to check that values go into the driver correctly and that results come back correctly.
 
 So today, `sql.rows<ProductRow>` is **your declaration**. It isn't the result of SQLBraid reading the SELECT list and proving that `ProductRow` is right. Keeping the SQL and the row type in sync is the author's responsibility. If you want to check the actual data, attach a schema that implements [Standard Schema](https://standard-schema.dev/), such as Zod:
 

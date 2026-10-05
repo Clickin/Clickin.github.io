@@ -70,9 +70,7 @@ SQLBraid는 이 네 가지를 라이브러리 쪽으로 옮기되, SQL 자체는
 
 ## MyBatis의 동적 SQL을 TypeScript 안으로 가져오기
 
-출발점은 MyBatis였습니다. 처음 개발을 시작할 때 남긴 요청은 이랬습니다.
-
-> @PLAN.md 에 따라서, mybatis 에서 영감을 받은 ts tagged literal 기반 type safe sql builder 를 개발해주세요.
+출발점은 MyBatis였습니다. 처음 그린 그림은 "MyBatis에서 영감을 받은, TypeScript tagged template 기반의 type-safe SQL builder"였습니다.
 
 MyBatis 3 mapper의 동적 SQL은 `<if>`, `<where>`, `<set>` 같은 태그를 SQL 사이에 끼워 넣습니다.[^mybatis] `<where>`는 안쪽 조건이 하나라도 남으면 `WHERE`를 붙이고 맨 앞의 `AND`/`OR`를 지웁니다. 조건이 몇 개든 SQL은 위에서 아래로 읽힙니다. 이 읽기 방식을 가져오고 싶었고, XML과 OGNL 대신 TypeScript tagged template 안에서 쓰기로 했습니다.
 
@@ -121,11 +119,11 @@ ORDER BY id
 
 ## 결과 타입을 어디까지 책임질 것인가
 
-처음 요청에는 "type safe sql builder"라는 말이 들어 있었습니다. 초기 구현은 그 말을 넓게 받아들여, SQL을 파싱해서 결과 타입을 추론하는 방향으로 갔습니다. 이후 9월 12일부터 적용한 product-pivot 계획에는 당시 구현이 이렇게 기록돼 있습니다.
+처음 목표에 넣은 "type-safe"는 범위를 넓게 잡은 말이었습니다. 첫 구현은 SQL을 파싱해서 결과 타입을 추론하는 방향으로 갔습니다. 만들어 보면서 이 방향이 SQLBraid가 가야 할 곳이 아니라고 판단했고, 9월 12일에 방향 전환 계획을 세웠습니다. 계획에는 그때까지의 구현을 이렇게 정리해 두었습니다.
 
 > `@sqlbraid/compiler` still depends directly on `@sqlbraid/ast` and `@sqlbraid/schema` and performs SQL parsing, schema-driven row inference, SQL-driven bind inference, semantic contract comparison, and structural analysis.
 
-같은 계획은 방향을 바꾸는 이유를 SQL 예제로 적었습니다.
+방향을 바꾸는 이유는 SQL 예제로 적었습니다.
 
 > SQLBraid must not need to understand expressions such as:
 >
@@ -137,11 +135,9 @@ ORDER BY id
 >
 > before the query can be typed using an explicit application contract.
 
-임의 SQL의 결과 타입을 추론하려면 사용자 정의 함수, extension, DB별 연산자와 형 변환 규칙을 SQLBraid가 알아야 합니다. 계획은 이 부분을 핵심 가치에서 빼고 "SQL semantics belong to the database"라고 정리했습니다. 이틀 뒤에는 제가 작업 지시에 범위를 더 직접적으로 적었습니다.
+임의 SQL의 결과 타입을 추론하려면 사용자 정의 함수, extension, DB별 연산자와 형 변환 규칙을 SQLBraid가 알아야 합니다. 그래서 이 부분을 핵심 가치에서 빼고 "SQL semantics belong to the database"라는 원칙으로 정리했습니다. 이틀 뒤에는 범위를 한 번 더 분명히 했습니다. SQLBraid는 parameter binder이지 query builder가 아니므로, 각 DB의 특수 문법이 지원되는지는 SQLBraid가 검증할 영역이 아닙니다.
 
-> 우리는 parameter binder 역할이지, query builder 역할이 아니므로 각 db의 특수 문법이 지원되는지 여부는 우리가 검증할 영역이 아닙니다.
-
-같은 지시에서 대신 검증할 대상으로 driver의 input/output 매핑을 꼽았습니다. SQL 문법을 검증하지 않는 대신, 값이 driver로 제대로 들어가고 결과가 제대로 나오는지를 복잡한 native SQL로 확인하자는 것이었습니다.
+대신 검증할 대상은 driver의 input/output 매핑으로 정했습니다. SQL 문법을 검증하지 않는 대신, 값이 driver로 제대로 들어가고 결과가 제대로 나오는지를 복잡한 native SQL로 확인하는 것입니다.
 
 그래서 지금의 `sql.rows<ProductRow>`는 **사용자의 선언**입니다. SQLBraid가 SELECT 목록을 읽고 `ProductRow`가 맞다고 증명한 결과가 아닙니다. SQL과 행 타입이 맞는지는 작성자가 책임집니다. 실제 데이터를 검사하고 싶다면 [Standard Schema](https://standard-schema.dev/)를 구현한 schema(Zod 등)를 붙입니다.
 

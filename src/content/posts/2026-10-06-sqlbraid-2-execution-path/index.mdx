@@ -133,11 +133,9 @@ reuse              { requested: "auto", effective: "simple", owner: "driver" }
 
 ### `db.prepare()`는 무엇을 고정하는가
 
-`reuse` 필드는 prepared statement와 관련이 있습니다. 한번은 README의 `db.prepare()` 예제를 보고 이렇게 물었습니다.
+`reuse` 필드는 prepared statement와 관련이 있습니다. README의 `db.prepare()` 예제를 다시 보다가 이 API가 정말 필요한지 의문이 들었습니다. 일반 함수로 만들어도 bind variable은 어차피 lexical scope에서 캡처되기 때문입니다.
 
-> @README.md 와 @README.ko.md 에서 언급하는 db.prepare 는 의미가 있나요? 그냥 일반 함수로 만들어도 bind variable 은 어차피 lexical scope에서 capture 될거고, prepare 의 사용처를 다시 한번 생각해보세요.
-
-검토 결과 일반 함수도 같은 바인딩을 만들었습니다. `searchProducts()` 자체가 그 예입니다. `db.prepare()`가 따로 하는 일은 **logical shape lock**입니다. 첫 실행의 result kind, dialect, segment, parameter metadata를 기억하고, 다음 실행에서 구조가 바뀌면 driver I/O 전에 거부합니다.
+따져 보니 실제로 일반 함수도 같은 바인딩을 만들었습니다. `searchProducts()` 자체가 그 예입니다. 그래서 `prepare`의 역할을 다시 정의했습니다. `db.prepare()`가 따로 하는 일은 **logical shape lock**입니다. 첫 실행의 result kind, dialect, segment, parameter metadata를 기억하고, 다음 실행에서 구조가 바뀌면 driver I/O 전에 거부합니다.
 
 ```ts
 const prepared = db.prepare("search", (f: ProductFilter) => searchProducts(f));
