@@ -1,6 +1,6 @@
 ---
 title: "SQLBraid 개발 노트 2: 값 바인딩부터 연결 해제까지, 쿼리 하나의 실행 경로"
-description: "SQLBraid에서 tagged template 하나가 logical statement, driver 요청, 물리 연결 사용과 반환으로 이어지는 경로를 따라가며 트랜잭션 실패와 스트림 조기 종료에서 지키는 규칙을 분석합니다."
+description: "SQLBraid에서 tagged template 하나가 logical statement, driver 요청, 물리 연결 사용과 반환으로 이어지는 경로를 따라가며 트랜잭션 실패와 스트림 조기 종료에서 지키는 규칙을 분석한다."
 date: 2026-10-06
 category: "Project > SQLBraid"
 tags: ["SQLBraid", "TypeScript", "PostgreSQL", "Oracle", "Transaction", "Connection Pool", "Stream"]
@@ -12,9 +12,9 @@ publish: false
 
 > English version: [SQLBraid Dev Notes 2: One Query's Path, from Value Binding to Connection Release](/blog/2026-10-06-sqlbraid-2-execution-path-en/)
 
-[지난 글](/blog/2026-10-06-sqlbraid-1-why-sql-first/)에서는 SQLBraid가 SQL 의미 분석을 내려놓고, 대신 값 바인딩·결과 선언·연결과 트랜잭션 수명을 맡기로 한 과정을 정리했습니다. 이번 글은 그 책임을 코드에서 어떻게 지키는지 봅니다.
+[지난 글](/blog/2026-10-06-sqlbraid-1-why-sql-first/)에서는 SQLBraid가 SQL 의미 분석을 내려놓고 값 바인딩, 결과 선언, 연결과 트랜잭션 수명을 맡기로 한 과정을 정리했다. 이번 글은 그 책임들을 코드에서 어떻게 구현하고 지키는지 본다.
 
-질문은 이것입니다. **같은 쿼리를 여러 driver에서 실행해도 값·결과·물리 자원의 규칙을 어떻게 유지하는가?** 패키지 순서로 설명하지 않고, 지난 글의 검색 쿼리 하나를 pool에서 실행하는 정상 경로를 끝까지 따라간 다음, 같은 쿼리를 트랜잭션과 스트림으로 바꿔 무엇이 달라지는지 보겠습니다.
+질문은 이것이다. **동일한 쿼리를 서로 다른 드라이버에서 실행해도 값, 결과, 물리 자원의 규칙을 어떻게 일정하게 유지하는가?** 패키지 구조를 나열하는 대신, 검색 쿼리 하나가 풀(pool)에서 실행되는 정상 경로를 끝까지 따라간 뒤, 트랜잭션과 스트림을 적용했을 때 무엇이 달라지는지 분석한다.
 
 ```ts
 function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
@@ -36,35 +36,33 @@ function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
 const rows = await db.all(searchProducts({ keyword: "lamp" }));
 ```
 
-글의 출력 예시는 SQLBraid 1.0.2 기준 저장소 빌드와 로컬 PostgreSQL 16 컨테이너, `pg` 8.23.0에서 직접 실행해 확인한 값입니다. 코드 링크는 [`v1.0.2` 태그](https://github.com/Clickin/SQLBraid/tree/v1.0.2)를 가리킵니다.
+글의 출력 예시는 SQLBraid 1.0.2 기준 저장소 빌드와 로컬 PostgreSQL 16 컨테이너, `pg` 8.23.0에서 직접 실행해 확인한 값이다. 코드 링크는 [`v1.0.2` 태그](https://github.com/Clickin/SQLBraid/tree/v1.0.2)를 가리킨다.
 
 ---
 
 ## tagged template는 실행 요청이 되기 전에 무엇이 되는가
 
-`searchProducts()`가 돌려주는 것은 SQL 문자열이 아니라 `Query` 객체입니다. `Query`는 template의 구조(IR), tag 호출 시점에 평가된 값 목록, 그리고 `rows`/`command`/`call` 같은 결과 종류를 들고 있습니다. 아직 placeholder도 없고 driver도 모릅니다.
+`searchProducts()`가 반환하는 것은 SQL 문자열이 아니라 `Query` 객체이다. `Query`는 템플릿의 구조(IR), 태그 호출 시점에 평가된 값 목록, 그리고 `rows`/`command`/`call` 같은 결과 종류를 보유한다. 이 단계에서는 아직 placeholder가 없으며 드라이버의 정체도 모른다.
 
-`query.render()`를 호출하면 directive가 풀리고 `RenderedStatement`가 나옵니다. `{ keyword: "lamp" }`로 만든 쿼리를 보면 둘의 차이가 드러납니다. 이하 출력은 읽기 쉽게 들여쓰기 공백만 줄였습니다.
+`query.render()`를 호출하면 directive가 풀리면서 `RenderedStatement`가 생성된다. `{ keyword: "lamp" }`로 만든 쿼리의 렌더링 결과를 보면 `Query`와의 차이가 분명하다. (출력은 가독성을 위해 들여쓰기 공백만 조정했다.)
 
 ```text
 query.values          [true, "%lamp%", false, null]
 
 rendered.segments     ["\n SELECT id, name, price\n FROM products\n WHERE name ILIKE ",
-                       "\n ORDER BY id\n "]
+                      "\n ORDER BY id\n "]
 rendered.parameters   ["%lamp%"]
 ```
 
-`query.values`에는 조건식 결과(`true`, `false`)와 비활성 분기의 값(`null`)까지 네 개가 들어 있습니다. 렌더링은 그중 활성 분기의 값만 parameter로 고르고, `where`가 맨 앞 `AND`를 지우고 `WHERE`를 붙인 SQL 조각을 segment로 남깁니다.
-
-`RenderedStatement`가 항상 지키는 규칙은 하나입니다.
+`query.values`에는 조건식의 결과(`true`, `false`)와 비활성 분기의 값(`null`)까지 모두 들어 있다. 렌더링 과정에서는 활성 분기의 값만 parameter로 추출하고, `where` directive는 맨 앞의 `AND`를 제거하고 `WHERE`를 붙인 SQL 조각을 segment로 남긴다.
+`RenderedStatement`가 항상 지키는 불변식은 하나이다.
 
 ```text
 segments.length === parameters.length + 1
 ```
 
-SQL 구조는 전부 segment에 있고, parameter는 전부 값입니다. 위 예에서는 segment 2개, parameter 1개입니다. 조건을 모두 끄면 segment 1개, parameter 0개가 됩니다. parameter가 식별자나 SQL 조각으로 해석되는 경로는 없습니다. `${"x' OR '1'='1"}`을 넣어도 parameter 배열에 그 문자열이 그대로 하나 들어갈 뿐입니다.
-
-구조를 바꾸려면 helper가 segment 쪽에 글자를 넣어야 합니다.
+SQL의 모든 구조는 segment에 있고, parameter는 오직 값으로만 존재한다. 위 예시에서는 segment 2개, parameter 1개이다. 조건을 모두 끄면 segment 1개, parameter 0개가 된다. parameter가 식별자나 SQL 조각으로 해석될 경로는 원천적으로 차단되어 있다. `${"x' OR '1'='1"}`과 같은 공격 코드를 넣어도 parameter 배열에 문자열 하나로 들어갈 뿐이다.
+구조를 바꾸려면 helper가 segment에 직접 텍스트를 넣어야 한다.
 
 ```ts
 sql.rows`SELECT id FROM products ORDER BY ${sql.ident("price")} DESC LIMIT ${10}`;
@@ -75,13 +73,13 @@ segments    ['SELECT id FROM products ORDER BY "price" DESC LIMIT ', ""]
 parameters  [10]
 ```
 
-`sql.ident`는 dialect 규칙으로 식별자를 quote해서 segment에 넣고, `10`은 parameter로 남습니다. `sql.raw(text)`도 segment에 글자를 넣지만 quote 없이 그대로 넣습니다. 이 경계를 넘는 유일한 helper이므로 외부 입력을 넣으면 안 됩니다.
+`sql.ident`는 다이얼렉트 규칙에 따라 식별자를 quote하여 segment에 넣고, `10`은 parameter로 남는다. `sql.raw(text)` 역시 quote 없이 segment에 텍스트를 넣는다. 이 helper들은 경계를 넘나들 수 있으므로 외부 입력을 직접 전달해서는 안 된다.
 
 ### 비활성 분기는 왜 별도 변환이 필요한가
 
-`query.values`에서 눈여겨볼 점이 있습니다. `maxPrice`의 값은 `null`로 들어 있고, `keyword`가 없을 때는 `"%undefined%"`가 들어갑니다. JavaScript는 tag 함수를 호출하기 전에 모든 `${...}`를 평가하기 때문입니다. directive는 주석이라서 JavaScript 평가 순서에 영향을 주지 못합니다.
+`query.values`에서 주목할 점은 `maxPrice`가 `null`로, `keyword`가 없을 때는 `"%undefined%"`로 들어 있다는 것이다. JavaScript는 태그 함수를 호출하기 전에 모든 `${...}`를 먼저 평가하기 때문이다. directive는 주석 형태이므로 JavaScript의 평가 순서에 영향을 줄 수 없다.
 
-값이 버려지기만 하면 괜찮지만, 평가 자체가 실패할 수 있습니다.
+단순한 값의 소실이라면 문제가 없으나, 평가 자체가 실패하는 상황이 발생한다.
 
 ```ts
 const user: { name: string } | null = null;
@@ -92,10 +90,9 @@ sql.rows`SELECT id FROM users
 // TypeError: Cannot read properties of null (reading 'name')
 ```
 
-TypeScript도 이 코드를 거부합니다. `if` directive는 주석이라 control-flow narrowing이 일어나지 않고, `user.name`에 TS18047(`'user' is possibly 'null'`)이 보고됩니다.
+TypeScript 역시 이 코드를 거부한다. `if` directive는 주석일 뿐이므로 control-flow narrowing이 작동하지 않고, `user.name`에 TS18047(`'user' is possibly 'null'`)이 보고된다.
 
-`@sqlbraid/compiler`는 directive가 있는 template만 찾아 다른 호출로 바꿉니다. 실제 변환 결과에서 핵심만 줄이면 이렇습니다.
-
+이를 해결하기 위해 `@sqlbraid/compiler`는 directive가 포함된 템플릿을 찾아 다른 호출 형태로 변환한다. 핵심 변환 결과는 다음과 같다.
 ```ts
 __sqlbraidCapture(sql.rows<ProductRow>, strings, (__sqlbraidValues) => {
   const __sqlbraidRead = (index, thunk) => {
@@ -111,15 +108,17 @@ __sqlbraidCapture(sql.rows<ProductRow>, strings, (__sqlbraidValues) => {
 }, templateIr);
 ```
 
-각 interpolation이 thunk로 감싸지고, 원래 directive 구조가 실제 `if` 문이 됩니다. 그래서 세 가지가 함께 보장됩니다. 비활성 분기의 식은 평가되지 않고, 각 식은 `Set`으로 한 번만 평가되며, 진짜 `if` 안에 있으니 TypeScript narrowing이 적용됩니다. 저장소의 테스트는 lowering된 가상 소스로 type check했을 때 `user != null` 분기 안의 `user.name`에서 TS18047이 사라지고, 조건이 무관한 `enabled`일 때는 원래 소스 위치에 TS18047이 남는 것을 확인합니다.
+각 보간(interpolation)이 thunk로 감싸지고, 원래의 directive 구조가 실제 `if` 문으로 대체된다. 이로써 세 가지 보장이 동시에 이루어진다. 첫째, 비활성 분기의 식은 평가되지 않는다. 둘째, 각 식은 `Set`을 통해 한 번만 평가된다. 셋째, 진짜 `if` 문 내부에 있으므로 TypeScript narrowing이 적용된다.
 
-이 보장은 tag만으로는 생기지 않습니다. 빌드 단계에서 compiler(Vite 통합 등)를 거친 소스에만 해당합니다. compiler는 directive lowering만 하고 SQL을 파싱하지 않습니다.
+저장소의 테스트는 lowering된 가상 소스로 타입 검사를 수행하여, `user != null` 분기 내부의 `user.name`에서 TS18047이 사라지고, 조건과 무관한 `enabled` 분기에서는 원래 소스 위치에 TS18047이 남는 것을 확인한다.
+
+이 보장은 빌드 단계에서 compiler(Vite 통합 등)를 거친 소스에만 적용된다. compiler는 directive lowering만 수행하며 SQL을 파싱하지 않는다.
 
 ---
 
 ## logical statement를 native driver 요청으로 바꾸는 경계
 
-`RenderedStatement`에는 `$1`이 없습니다. placeholder 문법은 dialect가 아니라 driver adapter의 `StatementBindingAdapter`가 정합니다. PostgreSQL `pg` adapter의 `describe()` 결과는 이렇습니다.
+`RenderedStatement`에는 `$1`이 없다. placeholder 문법은 dialect가 아니라 driver adapter의 `StatementBindingAdapter`가 정한다. PostgreSQL `pg` adapter의 `describe()` 결과는 다음과 같다.
 
 ```text
 transport          text-positional
@@ -127,15 +126,15 @@ parameterizedSql   SELECT id, name, price FROM products WHERE name ILIKE $1 ORDE
 reuse              { requested: "auto", effective: "simple", owner: "driver" }
 ```
 
-같은 segment/parameter 배열을 MySQL adapter는 `?`로, Oracle adapter는 `:1`로, SQL Server adapter는 `@p1`과 typed request로 바꿉니다. driver가 tagged template을 직접 받는 경우를 위한 `native-value-template` transport도 있습니다. logical statement 모양은 transport와 상관없이 같습니다.
+같은 segment/parameter 배열을 MySQL adapter는 `?`로, Oracle adapter는 `:1`로, SQL Server adapter는 `@p1`과 typed request로 바꾼다. driver가 tagged template을 직접 받는 경우를 위한 `native-value-template` transport도 있다. logical statement 모양은 transport와 상관없이 같다.
 
-순서도 정해져 있습니다. `describe()`는 순수 함수이고 **연결을 얻기 전에** 실행됩니다. parameter hint가 잘못됐거나 adapter가 지원하지 않는 바인딩이면 pool lease를 하나도 쓰지 않고 실패합니다. 연결을 얻은 뒤에는 lease의 `statementBinding`이 미리 description을 만든 adapter와 같은 객체인지 확인합니다. 다르면 그 lease를 discard하고 거부합니다. 다른 규칙으로 만든 placeholder SQL이 엉뚱한 driver로 가는 것을 막기 위해서입니다.
+순서도 정해져 있다. `describe()`는 순수 함수이고 **연결을 얻기 전에** 실행된다. parameter hint가 잘못됐거나 adapter가 지원하지 않는 바인딩이면 pool lease를 하나도 쓰지 않고 실패한다. 연결을 얻은 뒤에는 lease의 `statementBinding`이 미리 description을 만든 adapter와 같은 객체인지 확인한다. 다르면 그 lease를 discard하고 거부한다. 다른 규칙으로 만든 placeholder SQL이 엉뚱한 driver로 가는 것을 막기 위해서이다.
 
 ### `db.prepare()`는 무엇을 고정하는가
 
-`reuse` 필드는 prepared statement와 관련이 있습니다. README의 `db.prepare()` 예제를 다시 보다가 이 API가 정말 필요한지 의문이 들었습니다. 일반 함수로 만들어도 bind variable은 어차피 lexical scope에서 캡처되기 때문입니다.
+`reuse` 필드는 prepared statement와 관련이 있다. README의 `db.prepare()` 예제를 다시 보다가 이 API가 정말 필요한지 의문이 들었다. 일반 함수로 만들어도 bind variable은 어차피 lexical scope에서 캡처되기 때문이다.
 
-따져 보니 실제로 일반 함수도 같은 바인딩을 만들었습니다. `searchProducts()` 자체가 그 예입니다. 그래서 `prepare`의 역할을 다시 정의했습니다. `db.prepare()`가 따로 하는 일은 **logical shape lock**입니다. 첫 실행의 result kind, dialect, segment, parameter metadata를 기억하고, 다음 실행에서 구조가 바뀌면 driver I/O 전에 거부합니다.
+따져 보니 실제로 일반 함수도 같은 바인딩을 만들었다. `searchProducts()` 자체가 그 예이다. 그래서 `prepare`의 역할을 다시 정의했다. `db.prepare()`가 따로 하는 일은 **logical shape lock**이다. 첫 실행의 result kind, dialect, segment, parameter metadata를 기억하고, 다음 실행에서 구조가 바뀌면 driver I/O 전에 거부한다.
 
 ```ts
 const prepared = db.prepare("search", (f: ProductFilter) => searchProducts(f));
@@ -144,25 +143,25 @@ await prepared.all({ keyword: "lamp", maxPrice: 1 });
 // BRAID_PREPARED_SHAPE: Prepared query search changed its rendered structure.
 ```
 
-directive로 분기가 바뀌면 segment가 달라지므로, 동적 검색 쿼리는 `prepare` 대상이 아닙니다. 그리고 shape lock은 서버 쪽 prepared statement 재사용과 별개입니다. `pg` adapter는 `requested: "reuse"`를 받아도 `effective: "simple"`로 보고하고, 매번 `client.query({ text, values })`로 실행합니다. 그래서 README에서 `prepare`가 성능을 높인다는 문구를 지우고, 실제 재사용 여부는 adapter가 정한다고 고쳤습니다.
+directive로 분기가 바뀌면 segment가 달라지므로, 위 예시의 두 호출은 하나의 prepared shape를 유지할 수 없다. shape lock은 서버 쪽 prepared statement 재사용과도 별개이다. `pg` adapter는 `requested: "reuse"`를 받아도 `effective: "simple"`로 보고하고, 매번 `client.query({ text, values })`로 실행한다. 그래서 README에서 `prepare`가 성능을 높인다는 문구를 지우고, 실제 재사용 여부는 adapter가 정한다고 고쳤다.
 
 ---
 
 ## 실행과 결과 mapping 사이에서 connection을 언제 반환하나
 
-`db`가 무엇을 감싸고 있는지에 따라 이후 경로가 달라집니다.
+`db`가 무엇을 감싸고 있는지에 따라 이후 경로가 달라진다.
 
-- `createPgDatabase(client)`는 이미 연결된 물리 client 하나를 감싸는 **direct executor**입니다. SQLBraid는 그 client의 사용을 직렬화하지만 종료는 책임지지 않습니다.
-- `createPgPoolDatabase(pool)`은 `ConnectionProvider`를 감쌉니다. provider는 물리 연결을 빌려주는 곳이고, 빌린 연결 하나가 `ConnectionLease`입니다.
+- `createPgDatabase(client)`는 이미 연결된 물리 client 하나를 감싸는 **direct executor**이다. SQLBraid는 그 client의 사용을 직렬화하지만 종료는 책임지지 않는다.
+- `createPgPoolDatabase(pool)`은 `ConnectionProvider`를 감싼다. provider는 물리 연결을 빌려주는 곳이고, 빌린 연결 하나가 `ConnectionLease`이다.
 
-같은 pool 객체에 쿼리를 보낸다고 같은 연결을 쓰는 것은 아닙니다. 같은 `db`로 세 쿼리를 동시에 보내면 PostgreSQL backend pid가 셋 다 다르게 나옵니다.
+같은 pool 객체에 쿼리를 보낸다고 같은 연결을 쓰는 것은 아니다. 이번 실행에서는 같은 `db`로 동시에 보낸 세 쿼리가 서로 다른 PostgreSQL backend pid를 사용했다.
 
 ```text
 db.one(pid) × 3 (동시)        → ["85", "84", "86"]
 db.session(s => s.one(pid) × 3) → ["86", "86", "86"]
 ```
 
-pool에서 `db.all()`을 한 번 호출하면 런타임은 이 순서로 움직입니다.
+pool에서 `db.all()`을 한 번 호출하면 런타임은 이 순서로 움직이다.
 
 ```text
 render + binding.describe   연결 없이 수행
@@ -173,7 +172,9 @@ result-kind 검사            rows 선언에 command 결과가 오면 실패
 Standard Schema mapping     애플리케이션 검증·변환
 ```
 
-`runPrepared()`의 주석이 이 순서의 이유를 적고 있습니다.[^materialized]
+`runPrepared()`의 주석이 이 순서의 이유를 적고 있다.[^materialized]
+
+[^materialized]: `runPrepared()` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/materialized.ts#L263-L307
 
 ```ts
 // Materialize and release before Standard Schema mapping so pooled connections are not held during application code.
@@ -182,39 +183,37 @@ const raw = await physical(operation, use!, executionOptions);
 await use!.release(isPoisoned(use!.physicalState));
 ```
 
-`db.all()`의 결과는 이미 메모리에 다 올라온 배열입니다. 그 뒤의 schema 검증은 비동기일 수 있고 애플리케이션 코드가 얼마나 오래 걸릴지 알 수 없습니다. 그 시간 동안 개수가 정해진 pool 연결을 붙잡을 이유가 없습니다. schema의 `validate` 안에서 pool 상태를 찍어 보면, mapping 중에 연결이 이미 idle로 돌아가 있습니다.
+`db.all()`의 결과는 이미 메모리에 다 올라온 배열이다. 그 뒤의 schema 검증은 비동기일 수 있고 애플리케이션 코드가 얼마나 오래 걸릴지 알 수 없다. 그 시간 동안 개수가 정해진 pool 연결을 붙잡을 이유가 없다. schema의 `validate` 안에서 pool 상태를 찍어 보면, mapping 중에 연결이 이미 idle로 돌아가 있다.
 
 ```text
 query:ready → query:result → map(total=1, idle=1) ×3 → query:mapped
 ```
 
-이 순서는 pool root 작업에 해당합니다. 트랜잭션이나 session 안에서는 `release()`가 lease를 돌려주지 않고 그 연결에 대한 실행 순번만 풉니다. 연결은 scope가 끝날 때 한 번 반환됩니다.
+이 순서는 pool root 작업에 해당한다. 트랜잭션이나 session 안에서는 `release()`가 lease를 돌려주지 않고 그 연결에 대한 실행 순번만 푼다. 연결은 scope가 끝날 때 한 번 반환된다.
 
-result-kind 검사가 I/O 뒤에 온다는 점도 기억해야 합니다. `sql.rows`로 선언한 쿼리에 DML이 들어 있으면 실행 후에야 불일치가 발견됩니다. 이 검사는 부작용을 막지 못합니다.
+result-kind 검사가 I/O 뒤에 온다는 점도 기억해야 한다. `sql.rows`로 선언한 쿼리에 DML이 들어 있으면 실행 후에야 불일치가 발견된다. 이 검사는 부작용을 막지 못한다.
 
-### 값 정규화와 application mapping은 다른 층이다
+### 값 정규화와 application mapping의 층 분리
 
-위 표에서 값 정규화는 driver I/O 단계에, schema mapping은 반환 이후에 있습니다. 둘은 목적이 다릅니다.
+앞의 pool root 작업에서는 값 정규화가 드라이버 I/O 단계에, schema mapping이 lease 반환 이후에 수행된다. 둘은 목적이 다르다.
 
-- **TypePolicy**는 driver가 준 값을 SQLBraid의 기본 JavaScript 표현으로 바꿉니다. exact integer·decimal은 문자열, IEEE 근삿값은 number입니다.
-- **Standard Schema**는 그 기본 표현을 애플리케이션 타입으로 바꿉니다. decimal 문자열을 `Decimal`이나 `Money` 객체로 바꾸는 것은 여기서 합니다.
+- **TypePolicy**: 드라이버가 반환한 값을 SQLBraid의 기본 JavaScript 표현으로 변환한다. 정밀도가 중요한 exact integer와 decimal은 문자열로, IEEE 근삿값은 number로 처리한다.
+- **Standard Schema**: 기본 표현을 애플리케이션 타입으로 변환한다. 예를 들어 decimal 문자열을 `Decimal`이나 `Money` 객체로 바꾸는 작업이 여기서 이루어진다.
 
-TypePolicy가 driver 단계에 있어야 하는 이유는 정밀도 사례가 보여 줍니다. id가 `9007199254740993`, price가 `numeric(20,2)`의 `12345678901234567.89`인 행을 읽으면 이렇게 나옵니다.
+TypePolicy가 드라이버 단계에 있어야 하는 이유는 정밀도 손실을 방지하기 위해서이다. id가 `9007199254740993`, `numeric(20,2)` price가 `12345678901234567.89`인 행을 읽는 사례를 보면 알 수 있다.
 
 ```text
 { id: "9007199254740993", name: "big id lamp", price: "12345678901234567.89" }
 Number("9007199254740993") → 9007199254740992
 ```
 
-`pg` adapter는 exact numeric OID에 대해 driver의 type parser를 문자열 parser로 덮어써서, 값이 처음부터 number로 바뀌지 않게 합니다. 이미 number로 반올림된 값을 나중에 문자열로 바꿔도 잃은 자릿수는 돌아오지 않습니다. 그래서 이 변환은 mapping 층에서 할 수 없습니다.
+`pg` 어댑터는 exact numeric OID에 대해 드라이버의 타입 파서를 문자열 파서로 덮어써서, 값이 처음부터 number로 변환되는 것을 막는다. 이미 number로 반올림된 값은 나중에 문자열로 바꿔도 잃어버린 자릿수를 복구할 수 없기 때문이다. 따라서 이 변환은 mapping 층에서 수행할 수 없다.
 
-이 정책은 driver와 profile마다 근거가 따로 필요합니다. 예를 들어 Bun.SQL의 MySQL/MariaDB DECIMAL은 SQL에서 text로 바꾸지 않으면 거부되고, SQLite의 native decimal은 지원하지 않습니다. JSON 안의 숫자나 native `Date`의 정밀도는 별도 profile 문제입니다. 조합별 범위는 [data representation 문서](https://clickin.github.io/SQLBraid/latest/concepts/data-representation/)와 [limitations](https://clickin.github.io/SQLBraid/latest/release/limitations/)에 있습니다.
-
----
+이 정책은 드라이버와 프로필마다 근거가 다르다. Bun.SQL의 MySQL/MariaDB DECIMAL은 SQL에서 text로 변환하지 않으면 거부되며, SQLite의 native decimal은 지원하지 않는다. JSON 내부 숫자나 native `Date`의 정밀도는 별도의 프로필 문제이다. 조합별 상세 범위는 [data representation 문서](https://clickin.github.io/SQLBraid/latest/concepts/data-representation/)와 [limitations](https://clickin.github.io/SQLBraid/latest/release/limitations/)에서 확인할 수 있다.
 
 ## session과 transaction은 물리 자원의 소유권을 바꾼다
 
-pool root 작업은 쿼리마다 lease를 빌리고 바로 돌려줍니다. `session`과 `tx`는 이 소유권을 callback 범위로 늘립니다.
+결과를 materialize하는 pool root 작업은 쿼리마다 lease를 빌리고, 결과를 모두 읽은 뒤 application mapping 전에 반환한다. `session`과 `tx`는 lease 소유권을 callback 범위로 확장한다.
 
 ```d2
 direction: down
@@ -247,11 +246,11 @@ tx.lease -> stream.cur: "tx 안 stream은\n같은 연결 사용" {
 }
 ```
 
-`db.session(callback)`은 lease 하나를 callback 동안 고정하지만 트랜잭션을 시작하지 않습니다. 위 pid 결과에서 session 안의 쿼리가 모두 같은 연결을 쓴 것이 이것입니다. 연결 단위 설정이나 임시 테이블처럼 같은 연결이 필요하지만 트랜잭션은 필요 없을 때 씁니다.
+`db.session(callback)`은 lease 하나를 callback 동안 고정하지만 트랜잭션을 시작하지 않는다. 연결 단위 설정이나 임시 테이블처럼 같은 연결이 필요하지만 트랜잭션은 필요 없을 때 사용한다.
 
-`db.tx(callback)`은 연결 하나에서 `BEGIN`, callback, `COMMIT` 또는 `ROLLBACK`을 실행합니다. 안에서 다시 `tx.tx()`를 부르면 독립 트랜잭션이 아니라 같은 연결의 savepoint입니다. 그래서 nested 호출에는 isolation 같은 옵션을 줄 수 없습니다(`BRAID_TX_OPTIONS_NESTED`).
+`db.tx(callback)`은 연결 하나에서 `BEGIN`, callback, `COMMIT` 또는 `ROLLBACK`을 수행한다. 내부에서 다시 `tx.tx()`를 호출하면 독립 트랜잭션이 아니라 동일 연결의 savepoint가 생성된다. 따라서 nested 호출에는 isolation 같은 옵션을 설정할 수 없다(`BRAID_TX_OPTIONS_NESTED`).
 
-savepoint와 callback 범위를 지키려면 handle을 엇갈려 쓰는 것을 막아야 합니다.
+savepoint와 callback 범위를 지키기 위해 handle을 엇갈려 사용하는 것을 금지한다.
 
 ```ts
 await db.tx(async (tx) => {
@@ -267,11 +266,11 @@ await escaped.all(searchProducts({}));
 // BRAID_TX_CLOSED: Transaction database is no longer usable.
 ```
 
-savepoint가 열려 있는 동안 바깥 `tx`로 쿼리를 보내면, 그 쿼리가 savepoint 안에 속하는지 밖에 속하는지 애매해집니다. 끝난 트랜잭션의 handle을 다른 연결로 조용히 돌리면 원자성을 기대한 코드가 트랜잭션 밖에서 실행됩니다. SQLBraid는 두 경우 모두 다른 연결로 보내지 않고 거부합니다.
+savepoint가 활성인 동안 SQLBraid는 가장 안쪽 트랜잭션 handle만 허용한다. 바깥 `tx`를 사용하면 `BRAID_TX_SCOPE`로 거부한다. callback이 끝난 handle은 `BRAID_TX_CLOSED`로 거부한다. 이를 다른 연결로 대체하면 원자성을 기대한 코드가 원래 트랜잭션 밖에서 실행되기 때문이다.
 
 ### COMMIT 응답이 ROLLBACK일 때
 
-지난 글의 사례를 실행 경로로 다시 보겠습니다.
+지난 글의 사례를 실행 경로로 다시 분석한다.
 
 ```ts
 await db.tx(async (tx) => {
@@ -285,7 +284,9 @@ await db.tx(async (tx) => {
 });
 ```
 
-`missing_table` 오류로 PostgreSQL 트랜잭션은 aborted 상태가 됩니다. callback은 정상 반환합니다. 런타임은 열린 stream이 없는지 확인한 뒤 adapter의 `commit()`을 호출합니다. `pg`에서 이 `COMMIT`은 예외 없이 끝나고 결과의 `command`가 `"ROLLBACK"`입니다. 그래서 adapter의 transaction control 함수가 응답을 직접 검사합니다.[^pg-commit]
+`missing_table` 오류로 PostgreSQL 트랜잭션은 aborted 상태가 된다. callback은 정상 반환하지만, 런타임은 열린 stream이 없는지 확인한 뒤 어댑터의 `commit()`을 호출한다. `pg` 어댑터에서 이 `COMMIT`은 예외 없이 종료되나 결과의 `command`가 `"ROLLBACK"`으로 돌아온다. 따라서 어댑터의 transaction control 함수는 응답을 직접 검사한다.[^pg-commit]
+
+[^pg-commit]: `createPgExecutor()`의 `runControl` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/postgres/src/pg.ts#L699-L707
 
 ```ts
 const runControl = async (text: string): Promise<void> => {
@@ -299,7 +300,7 @@ const runControl = async (text: string): Promise<void> => {
 };
 ```
 
-그 다음 순서는 런타임의 `tx()`가 정합니다.
+이후 처리는 런타임의 `tx()`가 결정한다.
 
 ```text
 callback 정상 반환
@@ -311,15 +312,19 @@ callback 정상 반환
   → db.tx()는 BRAID_TX_NOT_COMMITTED로 reject
 ```
 
-COMMIT 결과가 기대와 다르면 그 연결이 지금 어떤 트랜잭션 상태인지 SQLBraid가 확신할 수 없습니다. 이런 연결은 poisoned로 표시합니다. pooled lease라면 `release({ discard: true })`로 pool에 돌려주지 않고 버리게 하고, direct executor라면 이후 모든 작업을 `BRAID_CONNECTION_POISONED`로 거부합니다. 불확실한 연결에 ROLLBACK을 한 번 더 보내 정상으로 되돌리려 하지 않습니다.
+SQLBraid는 예상과 다른 `COMMIT` 응답을 transaction control 실패로 처리하고 연결을 `poisoned`로 표시한다. 위의 `"ROLLBACK"` 응답은 트랜잭션이 커밋되지 않았음을 뜻한다. 런타임은 이 경우에도 control 실패 정책을 따른다. pooled lease는 `release({ discard: true })`로 폐기하고, direct executor는 이후 작업을 `BRAID_CONNECTION_POISONED`로 거부한다. 연결을 복구하려고 `ROLLBACK`을 다시 보내지는 않는다.
 
-실제 PostgreSQL에서 실행하면 `db.tx()`는 `BRAID_TX_NOT_COMMITTED`로 실패하고, `audit` 테이블의 행 수는 0입니다. 저장소의 contract test는 `pg` direct, `pg` pool, Bun.SQL PostgreSQL 세 경로에서 같은 상황을 fixture로 재현합니다. COMMIT이 정확히 한 번 호출됐는지, 그 뒤 pooled lease가 discard로 한 번 반환됐는지, direct 연결이 이후 control I/O에 도달하지 않는지를 확인합니다.[^contract-test]
+실제 PostgreSQL에서 실행하면 `db.tx()`는 `BRAID_TX_NOT_COMMITTED`로 실패하며, `audit` 테이블의 행 수는 0이다. 저장소의 contract test는 `pg` direct, `pg` pool, Bun.SQL PostgreSQL 세 경로에서 이를 재현하여, COMMIT이 정확히 한 번 호출되었는지, pooled lease가 discard로 반환되었는지, direct 연결이 이후 control I/O에 도달하지 않는지를 확인한다.[^contract-test]
+
+[^contract-test]: `transaction.commit-terminal-outcome` contract test — https://github.com/Clickin/SQLBraid/blob/v1.0.2/tests/contract-controls.test.ts#L444-L469
 
 ### 대조 사례: Oracle autoCommit
 
-Oracle에서는 같은 질문, 즉 "누가 commit을 소유하는가"가 다른 모습으로 나왔습니다. `node-oracledb`에는 전역 또는 호출별 `autoCommit` 옵션이 있습니다. 사용자가 `autoCommit: true`를 설정해 둔 상태에서 SQLBraid 관리 트랜잭션 안의 문장도 그 설정을 따르면, 문장마다 먼저 커밋돼서 `db.tx()`의 rollback이 의미를 잃습니다.
+Oracle에서는 "누가 커밋을 소유하는가"라는 질문이 다른 모습으로 나타난다. `node-oracledb`에는 전역 또는 호출별 `autoCommit` 옵션이 있다. 사용자가 `autoCommit: true`를 설정한 상태에서 SQLBraid 관리 트랜잭션 내부의 문장까지 이 설정을 따르면, 문장마다 즉시 커밋되어 `db.tx()`의 롤백이 무의미해진다.
 
-Oracle adapter는 트랜잭션이 활성인 동안에만 실행 옵션에 `autoCommit: false`를 덮어씁니다.[^oracle]
+Oracle 어댑터는 트랜잭션이 활성인 동안에만 실행 옵션에 `autoCommit: false`를 강제로 덮어쓴다.[^oracle]
+
+[^oracle]: `resolveExecuteOptions()` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/oracle/src/oracledb.ts#L850-L872
 
 ```ts
 return {
@@ -329,15 +334,15 @@ return {
 };
 ```
 
-트랜잭션 밖에서는 사용자가 준 옵션을 그대로 둡니다. 관리 트랜잭션 안에서는 commit과 rollback을 SQLBraid가 소유하고, 밖에서는 driver 설정이 소유하는 식으로 경계를 나눴습니다.
+트랜잭션 밖에서는 사용자가 설정한 옵션을 유지하고, 관리 트랜잭션 내부에서는 commit과 rollback을 SQLBraid가 소유함으로써 경계를 명확히 나눴다.
 
 ---
 
 ## stream은 iteration이 끝날 때까지 연결을 소유한다
 
-`db.all()`과 달리 `db.stream()`은 결과를 다 읽기 전에 행을 넘겨줍니다. PostgreSQL에서는 `pg-cursor`의 cursor가 연결 위에 열려 있어야 다음 행을 읽을 수 있습니다. 따라서 stream은 iteration이 끝날 때까지 lease를 돌려줄 수 없고, schema mapping도 행마다 연결을 쥔 채 수행합니다.
+`db.all()`과 달리 `db.stream()`은 결과를 모두 읽기 전에 행을 하나씩 넘겨준다. PostgreSQL에서는 `pg-cursor`가 연결 위에 열려 있어야 다음 행을 읽을 수 있다. 따라서 stream은 iteration이 종료될 때까지 lease를 반환할 수 없으며, schema mapping 또한 행마다 연결을 쥔 채 수행한다.
 
-소비자가 중간에 멈추는 경우를 보겠습니다.
+소비자가 중간에 iteration을 멈추는 경우를 본다.
 
 ```ts
 for await (const row of db.stream(searchProducts({ keyword: "lamp" }))) {
@@ -347,7 +352,8 @@ for await (const row of db.stream(searchProducts({ keyword: "lamp" }))) {
 // break 후 pool: total=1, idle=1
 ```
 
-`break`는 async generator의 `return()`을 호출하고, SQLBraid의 stream 함수는 `finally` 블록에서 정리를 시작합니다.[^stream]
+`break`는 async generator의 `return()`을 호출하며, SQLBraid의 stream 함수는 `finally` 블록에서 정리를 시작한다.[^stream]
+[^stream]: stream 정리 경로 — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/stream.ts#L249-L327
 
 ```ts
 } finally {
@@ -365,15 +371,16 @@ for await (const row of db.stream(searchProducts({ keyword: "lamp" }))) {
   }
   ...
   await use!.release(isPoisoned(use!.physicalState));
+}
 ```
 
-순서가 중요합니다. driver iterator의 `return()`이 먼저 cursor를 닫고, 그다음에 lease를 반환합니다. 반대로 lease를 먼저 반환하면 다른 요청이 그 연결을 가져간 상태에서 이전 cursor의 정리가 같은 연결에 끼어들 수 있습니다.
+여기서 순서가 결정적이다. 드라이버 iterator의 `return()`이 먼저 cursor를 닫고, 그 후에 lease를 반환한다. 만약 lease를 먼저 반환하면, 다른 요청이 해당 연결을 획득한 상태에서 이전 cursor의 정리 작업이 같은 연결에 끼어드는 심각한 문제가 발생할 수 있다.
 
-실패를 다루는 원칙도 이 코드에 있습니다. 행을 읽다가 실패한 뒤 정리까지 실패하면, 두 오류를 `AggregateError`로 묶고 `cause`에는 원래 실패를 둡니다. 정리 오류가 원래 오류를 덮지 않습니다. 정리에 실패한 연결은 poisoned로 표시되고, `release()`에 discard 플래그가 전달됩니다. 저장소에는 early return 때 native resource가 pool lease보다 먼저 닫히는지, 정리 실패 시 lease가 discard되는지를 확인하는 테스트가 따로 있습니다.
+실패 처리 원칙 또한 이 코드에 반영되어 있다. 행 읽기 도중 실패한 뒤 정리 작업까지 실패하면, 두 오류를 `AggregateError`로 묶고 `cause`에 원래의 실패를 보존한다. 정리 오류가 원래의 원인을 덮어쓰지 않게 하기 위함이다. 정리에 실패한 연결은 `poisoned`로 표시되며, `release()` 호출 시 discard 플래그가 전달된다. 저장소의 테스트는 early return 시 native resource가 pool lease보다 먼저 닫히는지, 정리 실패 시 lease가 discard되는지를 검증한다.
 
-### 열린 stream과 트랜잭션 전환은 함께 갈 수 없다
+### 트랜잭션 범위를 바꾸기 전에 stream을 닫는다
 
-트랜잭션 안의 stream은 트랜잭션 연결을 씁니다. cursor가 열린 상태로 같은 연결에 savepoint를 만들면, driver마다 열린 cursor와 savepoint의 관계가 다르거나 정의돼 있지 않습니다. SQLBraid는 이 조합을 거부합니다.
+트랜잭션 내부의 stream은 트랜잭션 연결을 공유한다. cursor가 열린 상태에서 동일 연결에 savepoint를 생성하면, 드라이버마다 cursor와 savepoint의 관계가 다르거나 정의되어 있지 않는다. SQLBraid는 이러한 조합을 거부한다.
 
 ```ts
 await db.tx(async (tx) => {
@@ -384,32 +391,24 @@ await db.tx(async (tx) => {
 });
 ```
 
-stream을 닫지 않은 채 `tx`나 `session` callback이 끝나도 SQLBraid는 남은 stream을 닫은 뒤 `BRAID_STREAM_SCOPE`로 실패시킵니다.
+stream을 닫지 않은 채 `tx`나 `session` callback이 종료되어도, SQLBraid는 남은 stream을 강제로 닫은 뒤 `BRAID_STREAM_SCOPE` 오류를 발생시킨다.
 
-streaming을 지원하지 않는 adapter에서 결과를 다 읽은 뒤 stream처럼 돌려주는 방법도 있습니다. 그러면 호출하는 코드는 그대로 동작하지만, 메모리를 행 수만큼 쓰지 않는다는 `stream()`의 전제가 깨집니다. 예를 들어 libSQL adapter는 streaming을 지원하지 않아서 `db.stream()`을 `BRAID_STREAM_UNSUPPORTED`로 거부합니다.
+결과를 모두 메모리에 읽은 뒤 행을 하나씩 넘겨 streaming을 흉내 낼 수도 있다. API 형태는 유지되지만 결과를 점진적으로 읽는 동작은 사라진다. SQLBraid는 이 대안을 사용하지 않는다. libSQL 어댑터는 `db.stream()`을 `BRAID_STREAM_UNSUPPORTED`로 거부한다.
 
----
+## 공통 API가 동일한 native 기능을 의미하지는 않는다
 
-## 공통 API가 동일한 native 기능을 뜻하지는 않는다
+앞선 stream 거부 사례는 SQLBraid 전체에 적용되는 규칙이다. 어댑터가 특정 기능을 물리적으로 제공하지 못하면 buffering이나 흉내, 기능 축소 없이 명시적인 오류로 실패한다. 취소 신호를 지원하지 않는 드라이버에 활성 `AbortSignal`을 전달하면 I/O 전에 `BRAID_CANCEL_UNSUPPORTED`로 실패하며, savepoint가 없는 리소스에서 nested `tx`를 호출하면 `BRAID_TX_UNSUPPORTED`로 실패한다. 지원 여부는 [DB·driver·runtime 조합별 지원 매트릭스](https://clickin.github.io/SQLBraid/latest/reference/support/)에서 확인할 수 있다.
 
-앞의 stream 거부는 SQLBraid 전체에 적용되는 규칙입니다. adapter가 어떤 기능을 물리적으로 제공하지 못하면 buffering, 흉내, 기능 축소 없이 명시적인 오류로 실패합니다. 취소 신호를 지원하지 않는 driver에 활성 `AbortSignal`을 주면 I/O 전에 `BRAID_CANCEL_UNSUPPORTED`로 실패하고, savepoint가 없는 resource에서 nested `tx`를 부르면 `BRAID_TX_UNSUPPORTED`로 실패합니다. 지원 여부는 [DB·driver·runtime 조합별 지원 매트릭스](https://clickin.github.io/SQLBraid/latest/reference/support/)에 기록합니다.
-
-지금까지 따라온 경로를 책임별로 다시 나누면 이렇습니다.
+지금까지 살펴본 실행 경로를 책임별로 다시 정리하면 다음과 같다.
 
 | 경로상 위치 | 책임 | 지키는 규칙 |
 |---|---|---|
 | `sql` tag, `render()` | authoring/template | 보간은 값, 구조는 helper, segment = parameter + 1 |
 | `StatementBindingAdapter.describe()` | binding/adapter | placeholder·transport는 adapter 소유, 연결 전에 순수하게 실행 |
-| lease 획득·반환, `session`/`tx`/`stream` | lifecycle/runtime | materialize 후 mapping 전 반환, tx는 연결 고정, stream은 정리 후 반환, 불확실한 연결은 버림 |
+| lease 획득·반환, `session`/`tx`/`stream` | lifecycle/runtime | materialized pool root 작업은 mapping 전 반환, session·tx는 연결 고정, stream은 정리 후 반환, poisoned 연결은 폐기 |
 | executor의 결과 정규화 | adapter + TypePolicy | exact 값은 driver 단계에서 문자열로 |
-| Standard Schema | application mapping | 연결을 쥐지 않고 애플리케이션 타입으로 변환 |
+| Standard Schema | application mapping | 기본 표현을 애플리케이션 타입으로 변환. materialized pool root 작업은 연결 반환 후, stream과 pinned scope는 연결을 보유한 채 수행 |
 
-compiler, metadata, codegen, LSP는 이 표에 없습니다. 런타임은 이 패키지들에 의존하지 않습니다. compiler는 위에서 본 directive lowering을 빌드 단계에서 할 뿐이고, metadata와 codegen은 DB에서 읽은 테이블 정보를 TypeScript 모델로 만드는 선택 도구입니다. 실행 경로의 규칙은 이 도구들이 없어도 똑같이 지켜져야 합니다.
+compiler, metadata, codegen, LSP는 이 표에 포함되지 않는다. 런타임은 이 패키지들에 의존하지 않기 때문이다. compiler는 빌드 단계에서 directive lowering을 수행할 뿐이며, metadata와 codegen은 DB 정보를 TypeScript 모델로 만드는 선택적 도구이다. 실행 경로의 규칙은 이러한 도구들의 존재 여부와 상관없이 동일하게 지켜져야 한다.
 
-SQLBraid의 추상화가 DB 사이의 차이를 없애지는 않습니다. 값과 구조를 나누는 규칙, 결과 종류 검사, 연결을 언제 빌리고 반환할지, 불확실한 연결을 버리는 규칙은 모든 adapter가 따르는 공통 규칙으로 만들었습니다. placeholder 문법과 transport, 정확한 값을 얻는 방법, streaming·취소·savepoint 지원 여부는 adapter마다 다르고, SQLBraid는 이 차이를 지원 기록과 명시적인 오류로 드러냅니다. 두 번째 묶음을 첫 번째처럼 보이게 만들 수도 있었지만, 그러면 PostgreSQL의 COMMIT 응답이나 열린 cursor처럼 이 글에서 본 문제를 사용자가 알아챌 방법이 사라집니다.
-
-[^materialized]: `runPrepared()` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/materialized.ts#L263-L307
-[^pg-commit]: `createPgExecutor()`의 `runControl` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/postgres/src/pg.ts#L699-L707
-[^contract-test]: `transaction.commit-terminal-outcome` contract test — https://github.com/Clickin/SQLBraid/blob/v1.0.2/tests/contract-controls.test.ts#L444-L469
-[^oracle]: `resolveExecuteOptions()` — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/oracle/src/oracledb.ts#L850-L872
-[^stream]: stream 정리 경로 — https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/stream.ts#L249-L327
+SQLBraid는 값 바인딩, 결과 종류 검사, 연결 수명, transaction control 실패에 공통 규칙을 둔다. placeholder 문법, transport, 정밀도 처리, native 기능 지원까지 어댑터마다 같게 만들지는 않는다. 이 차이를 공통 API 뒤에 숨길 수도 있었겠지만, `COMMIT` 응답과 cursor 정리 사례는 실행 경로에서 그 차이를 고려해야 하는 이유를 보여 준다.
