@@ -20,6 +20,7 @@ const posts = defineCollection({
     series: z.string().optional(),
     order: z.number().optional(),
     canonical: z.url().optional(),
+    lang: z.string().optional(),
   }),
 });
 

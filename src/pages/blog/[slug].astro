@@ -28,6 +28,7 @@ const structuredData = {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
   "headline": post.data.title,
+  "inLanguage": post.data.lang ?? siteCfg.language,
   "url": postUrl,
   "description": post.data.description ?? siteCfg.description,
   "image": new URL(ogImage, siteUrl).href,
@@ -61,6 +62,7 @@ const structuredData = {
   publishDate={post.data.date}
   updatedDate={post.data.updated}
   structuredData={structuredData}
+  lang={post.data.lang}
 >
   <!-- Mobile Category Navigation -->
   <div class="lg:hidden mb-4">

@@ -1,0 +1,221 @@
+---
+title: "SQLBraid Dev Notes 1: Why I Built a SQL-First Toolkit for TypeScript"
+description: "You keep writing raw SQL. So how much should a library take on: value binding, dynamic conditions, result types, connection and transaction lifetimes? A look at how SQLBraid drew that line."
+date: 2026-10-06
+category: "Project > SQLBraid"
+tags: ["SQLBraid", "TypeScript", "SQL", "MyBatis", "PostgreSQL", "tagged template", "English"]
+series: "SQLBraid Dev Notes"
+order: 1
+draft: true
+publish: false
+lang: "en"
+---
+
+> 한국어: [SQLBraid 개발 노트 1: SQL을 직접 쓰는 TypeScript 도구를 만든 이유](/blog/2026-10-06-sqlbraid-1-why-sql-first/)
+
+[SQLBraid](https://github.com/Clickin/SQLBraid) is a data-access toolkit for writing SQL directly in TypeScript. You write the SQL. The library's job is to hand that SQL to the driver safely and to take care of results and connections. It ships adapters for PostgreSQL, MySQL, MariaDB, SQLite, Oracle and SQL Server, and it's on npm as `sqlbraid`.
+
+Rather than walk through a feature list, this post follows one question: **if you keep writing raw SQL, what should a library still do for you?** What I set out to build and what SQLBraid does today turned out to be quite different. Below is what I dropped, what I added along the way, and where SQLBraid makes different choices from similar tools.
+
+---
+
+## What's left when you write SQL yourself
+
+Let's start with a single product search. The keyword and the maximum price are both optional.
+
+With plain `pg`, the code looks roughly like this:
+
+```ts
+interface ProductRow {
+  id: string;
+  name: string;
+  price: string;
+}
+
+async function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
+  const where: string[] = [];
+  const values: unknown[] = [];
+
+  if (filter.keyword != null) {
+    values.push(`%${filter.keyword}%`);
+    where.push(`name ILIKE $${values.length}`);
+  }
+  if (filter.maxPrice != null) {
+    values.push(filter.maxPrice);
+    where.push(`price <= $${values.length}`);
+  }
+
+  const text = `
+    SELECT id, name, price
+    FROM products
+    ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+    ORDER BY id`;
+
+  const { rows } = await pool.query<ProductRow>(text, values);
+  return rows;
+}
+```
+
+This works, and the values are sent as parameters. If you have a handful of queries and only use PostgreSQL, it's enough. Plenty of projects have no reason to add a library.
+
+But as conditions pile up, a few chores end up scattered across the code:
+
+- **The SQL structure gets fragmented.** To see the SQL that actually runs, you have to combine two arrays and a string template in your head.
+- **You number placeholders by hand.** `$${values.length}` is PostgreSQL syntax. MySQL wants `?`, Oracle wants `:1`.
+- **`ProductRow` is only a promise.** The generic in `pool.query<ProductRow>` says you trust the result to have that shape. Nothing checks it.
+- **Connection lifetimes are invisible.** Each `pool.query` call may use a different physical connection. For a transaction you `pool.connect()` a client and pair `BEGIN`, `COMMIT` and `release()` yourself.
+
+SQLBraid's goal was to move those four chores into the library without touching the SQL itself.
+
+---
+
+## Bringing MyBatis-style dynamic SQL into TypeScript
+
+The starting point was MyBatis, the SQL mapper I used for years on Java backends. The picture I started with was "a type-safe SQL builder on TypeScript tagged templates, inspired by MyBatis".
+
+MyBatis 3 mappers express dynamic SQL by placing tags such as `<if>`, `<where>` and `<set>` between pieces of SQL.[^mybatis] `<where>` adds `WHERE` if at least one inner condition survives, and strips a leading `AND`/`OR`. However many conditions there are, the SQL still reads top to bottom. I wanted that reading experience, but inside a TypeScript tagged template instead of XML and OGNL.
+
+Here is the same search written with SQLBraid:
+
+```ts
+import { createPgPoolDatabase, sql } from "sqlbraid/pg";
+
+const db = createPgPoolDatabase(pool);
+
+function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
+  return sql.rows<ProductRow>`
+    SELECT id, name, price
+    FROM products
+    /*@braid where*/
+      /*@braid if ${filter.keyword != null}*/
+        AND name ILIKE ${"%" + filter.keyword + "%"}
+      /*@braid end*/
+      /*@braid if ${filter.maxPrice != null}*/
+        AND price <= ${filter.maxPrice}
+      /*@braid end*/
+    /*@braid end*/
+    ORDER BY id
+  `;
+}
+
+const rows = await db.all(searchProducts({ keyword: "lamp", maxPrice: 30000 }));
+```
+
+The directives are SQL comments, so if you delete them you're left with ordinary SQL. Pass only `{ keyword: "lamp" }` and PostgreSQL receives:
+
+```sql
+SELECT id, name, price
+FROM products
+WHERE name ILIKE $1
+ORDER BY id
+```
+
+The value for `$1`, `"%lamp%"`, never enters the SQL string. It goes to the driver as a separate parameter. **A plain `${value}` is always a value binding.** It looks like JavaScript string interpolation, but nothing is concatenated into the SQL text. Pass `${"x' OR '1'='1"}` and that string is just one value to compare against. Whether the placeholder is `$1` or `?` is decided by SQLBraid's driver adapter.
+
+Values that change the **structure** of the SQL, such as a column name or a sort direction, can't go in through interpolation. You have to use explicit helpers like `sql.ident(name)`, `sql.fragment`, `sql.list` or `sql.join`. `sql.raw(text)` is the escape hatch that inserts a string into the SQL as is. As the name says, feeding it external input opens you straight up to SQL injection, so use it only for trusted strings fixed in your code.
+
+There's one more thing newcomers tend to miss. A tagged template evaluates every `${...}` before the tag function is called. In the example above, when `keyword` is missing, `"%" + filter.keyword + "%"` is evaluated to `"%undefined%"` and then thrown away. The value isn't used, so the result is correct. But put an expression like `${user.name}` inside a branch where `user` may be `null`, and you get a `TypeError` even though the branch is inactive. To skip evaluating inactive branches altogether, transform your source with the optional `@sqlbraid/compiler` package. Without that transform, any expression inside a branch has to be safe to run regardless of the condition.
+
+---
+
+## How far should result types go?
+
+The "type-safe" in that first goal was broad. The first implementation went in the direction of parsing SQL to infer result types. Building it convinced me that this wasn't where SQLBraid should go, and on September 12 I drew up a plan to change direction. The plan summed up the implementation so far like this:
+
+> `@sqlbraid/compiler` still depends directly on `@sqlbraid/ast` and `@sqlbraid/schema` and performs SQL parsing, schema-driven row inference, SQL-driven bind inference, semantic contract comparison, and structural analysis.
+
+I explained the reason for the change with a SQL example:
+
+> SQLBraid must not need to understand expressions such as:
+>
+> ```sql
+> custom_company_function(...)
+> jsonb_path_query(...)
+> vendor_extension(...)
+> ```
+>
+> before the query can be typed using an explicit application contract.
+
+Inferring the result type of arbitrary SQL means SQLBraid would have to understand user-defined functions, extensions, and each database's operators and coercion rules. So I took that out of the core value and set down a principle: "SQL semantics belong to the database". Two days later I made the scope even sharper. SQLBraid is a parameter binder, not a query builder, so whether each database's special syntax works is not something SQLBraid should verify.
+
+What it should verify instead is the driver's input and output mapping. Rather than validating SQL syntax, SQLBraid uses complex native SQL to check that values go into the driver correctly and that results come back correctly.
+
+So today, `sql.rows<ProductRow>` is **your declaration**. It isn't the result of SQLBraid reading the SELECT list and proving that `ProductRow` is right. Keeping the SQL and the row type in sync is the author's responsibility. If you want to check the actual data, attach a schema that implements [Standard Schema](https://standard-schema.dev/), such as Zod:
+
+```ts
+const ProductSchema = z.object({ id: z.string(), name: z.string(), price: z.string() });
+
+// Every row goes through schema validation and transformation
+const checked = await db.all(sql.rows(ProductSchema)`SELECT id, name, price FROM products`);
+```
+
+The API keeps the declaration (`sql.rows<T>`) and runtime validation (`sql.rows(schema)`) separate. Neither one checks that the SQL is semantically correct for your database. The database decides that when it runs the query.
+
+That doesn't mean SQLBraid never reads SQL. Finding directives, telling comments apart from string literals, and splitting structure from values all require each database's lexical rules, such as its comment syntax and dollar quoting. What's gone is a full SQL parser and semantic analysis. The repository rules say explicitly not to bring back "complete SQL grammars, function catalogs, operator or coercion systems, or arbitrary SQL-to-TypeScript inference".
+
+---
+
+## The scope got more concrete as I built it
+
+Once SQL semantic analysis was off the table, I expected little more than binding to be left. In practice, the work grew in a different direction: when to acquire and release a connection, whether a transaction really committed, whether a number arrived without losing precision. Every driver behaves differently on these points, and in every case they're hard for users to check on their own.
+
+PostgreSQL's response to `COMMIT` is the clearest example.
+
+```ts
+await db.tx(async (tx) => {
+  await tx.execute(sql.command`INSERT INTO audit (note) VALUES (${"first"})`);
+  try {
+    await tx.execute(sql.command`INSERT INTO missing_table VALUES (1)`);
+  } catch {
+    // swallow the failure and keep going
+  }
+  return "ok";
+});
+```
+
+When the second INSERT fails, the PostgreSQL transaction is aborted. The callback caught the exception, so it returns normally, and the library sends `COMMIT`. The server doesn't raise an error. The `COMMIT` call completes as if it succeeded, and only the command tag in the response says `ROLLBACK`. Run it with plain `pg` and the result object for `COMMIT` has `command: "ROLLBACK"`. The first INSERT was never saved.
+
+A call that finishes without throwing hadn't actually committed. So the PostgreSQL adapter checks the real command in the `COMMIT` response, and if it's `ROLLBACK`, `db.tx()` fails. The code above throws instead of returning `"ok"`.
+
+Number representation was a similar problem. Read the PostgreSQL `bigint` value `9007199254740993` into a JavaScript `number` and you get `9007199254740992`. SQLBraid returns exact integers and decimals as strings, which is also why `price` in the example is a `string`. How far that policy holds for each driver and profile, and what happens to a connection after a failed transaction, are covered in the next post, following the execution path.
+
+---
+
+## Where SQLBraid chooses differently from existing tools
+
+Writing SQL with tagged templates isn't something SQLBraid invented. Here I compare it with two close neighbours, looking at how you write SQL and where the result type comes from.
+
+**Slonik**[^slonik] is the closest. It describes itself as a "Node.js PostgreSQL client with strict types, detailed logging and assertions", and one of its principles is "Promotes writing raw SQL". Value binding, structural helpers such as `sql.identifier` and `sql.join`, runtime result validation with Zod (`sql.type`), scoping a connection to a `pool.connect()` callback, and nesting transactions with savepoints all overlap with SQLBraid.
+
+There are three differences. Slonik is PostgreSQL-only. It also lists "Discourages ad-hoc dynamic generation of SQL" as a principle, which points away from MyBatis-style dynamic SQL with conditional branches inside the query. Finally, Slonik offers transaction and query retries as features, whereas SQLBraid doesn't retry or route. It returns the failure as is and leaves the decision to your application. If you only use PostgreSQL and rarely need dynamic SQL, Slonik may well be the better fit.
+
+**Kysely**[^kysely] is a "type-safe and autocompletion-friendly TypeScript SQL query builder". You declare your tables in a `Database` interface, and the result type is built from the columns and aliases you select through its fluent API. It also has a `sql` tag for raw SQL. Its core dialects cover PostgreSQL, MySQL, SQL Server and SQLite.
+
+| | How you write SQL | Where the result type comes from |
+|---|---|---|
+| Slonik | Raw SQL + tagged template | Declaration, or a Zod schema |
+| Kysely | Builder API (plus a raw `sql` tag) | Schema declaration + inference from the builder |
+| SQLBraid | Raw SQL + tagged template + comment directives | Declaration, or Standard Schema |
+
+With Kysely, you get result types in exchange for re-expressing queries through a builder. SQLBraid keeps SQL as it is, and you declare the result type yourself. If you often use database-specific syntax that a builder struggles to express, or you pass SQL back and forth with a DBA, SQLBraid is the better match. If you want typos in column names caught at compile time against your table definitions, Kysely is.
+
+---
+
+## When to use it
+
+SQLBraid fits when:
+
+- you write SQL yourself and want to use your database's own syntax and features as they are;
+- you want condition-heavy dynamic SQL to still read like SQL;
+- you want the same binding rules, the same way of declaring results, and the same transaction and stream APIs across several databases or drivers;
+- you're fine declaring result types yourself and adding runtime validation only where you need it.
+
+On the other hand, if you want the result type of any SELECT inferred automatically, or an ORM that walks relations and fills in an object graph, another tool will serve you better.
+
+The limits are real too. SQLBraid has one public API, but feature support differs for each combination of database, driver and runtime. Some adapters don't support streaming or cancellation, and unsupported features are rejected with an error rather than emulated. The exact coverage is recorded per combination in the [support matrix](https://clickin.github.io/SQLBraid/latest/reference/support/) and the [current limitations](https://clickin.github.io/SQLBraid/latest/release/limitations/). And whether your SQL is semantically correct, and whether your declared row type matches it, is still up to the database and to you.
+
+In the [next post](/blog/2026-10-06-sqlbraid-2-execution-path-en/), I follow the search query from this post in code: how it's split into values and structure, turned into a driver request, and how it acquires and releases a physical connection.
+
+[^mybatis]: MyBatis 3, "Dynamic SQL": `if`, `choose`, `where`, `set`, `trim`, `foreach`. https://mybatis.org/mybatis-3/dynamic-sql.html
+[^slonik]: Slonik README: "A battle-tested Node.js PostgreSQL client with strict types, detailed logging and assertions." Principles: "Promotes writing raw SQL.", "Discourages ad-hoc dynamic generation of SQL." https://github.com/gajus/slonik
+[^kysely]: Kysely, "Introduction": "Kysely (pronounced “Key-Seh-Lee”) is a type-safe and autocompletion-friendly TypeScript SQL query builder." https://kysely.dev/docs/intro. Supported dialects: https://kysely.dev/docs/dialects

@@ -1,0 +1,416 @@
+---
+title: "SQLBraid Dev Notes 2: One Query's Path, from Value Binding to Connection Release"
+description: "Follow one SQLBraid tagged template as it becomes a logical statement, a driver request, and a physical connection that is used and returned, and see the rules it keeps when a transaction fails or a stream stops early."
+date: 2026-10-06
+category: "Project > SQLBraid"
+tags: ["SQLBraid", "TypeScript", "PostgreSQL", "Oracle", "Transaction", "Connection Pool", "Stream", "English"]
+series: "SQLBraid Dev Notes"
+order: 2
+draft: true
+publish: false
+lang: "en"
+---
+
+> 한국어: [SQLBraid 개발 노트 2: 값 바인딩부터 연결 해제까지, 쿼리 하나의 실행 경로](/blog/2026-10-06-sqlbraid-2-execution-path/)
+
+[Last time](/blog/2026-10-06-sqlbraid-1-why-sql-first-en/) I described how SQLBraid gave up on SQL semantic analysis and took on value binding, result declarations, and connection and transaction lifetimes instead. This post looks at how the code implements and maintains those responsibilities.
+
+The question is: **when the same query runs on different drivers, how do the rules for values, results, and physical resources stay consistent?** Instead of walking through packages, I'll follow a single search query along the normal path through a pool, then analyze how this path changes when transactions and streams are introduced.
+
+```ts
+function searchProducts(filter: { keyword?: string; maxPrice?: number }) {
+  return sql.rows<ProductRow>`
+    SELECT id, name, price
+    FROM products
+    /*@braid where*/
+      /*@braid if ${filter.keyword != null}*/
+        AND name ILIKE ${"%" + filter.keyword + "%"}
+      /*@braid end*/
+      /*@braid if ${filter.maxPrice != null}*/
+        AND price <= ${filter.maxPrice}
+      /*@braid end*/
+    /*@braid end*/
+    ORDER BY id
+  `;
+}
+
+const rows = await db.all(searchProducts({ keyword: "lamp" }));
+```
+
+Every output shown here came from actually running it: a repository build of SQLBraid 1.0.2, a local PostgreSQL 16 container and `pg` 8.23.0. Code links point at the [`v1.0.2` tag](https://github.com/Clickin/SQLBraid/tree/v1.0.2).
+
+---
+
+## What a tagged template becomes before it's a request
+
+`searchProducts()` does not return a SQL string; it returns a `Query` object. This object holds the template's structure (an IR), the values evaluated at the time of the tag call, and the result kind (e.g., `rows`, `command`, `call`). At this stage, no placeholders exist and the driver is not yet known.
+
+Calling `query.render()` resolves the directives and produces a `RenderedStatement`. Comparing the two for a query built from `{ keyword: "lamp" }` reveals the difference. (Indentation has been trimmed for readability.)
+
+```text
+query.values          [true, "%lamp%", false, null]
+
+rendered.segments     ["\n SELECT id, name, price\n FROM products\n WHERE name ILIKE ",
+                      "\n ORDER BY id\n "]
+rendered.parameters   ["%lamp%"]
+```
+
+`query.values` contains all evaluations, including condition results (`true`, `false`) and values from inactive branches (`null`). Rendering extracts only the values of active branches as parameters, while the `where` directive removes the leading `AND` and adds `WHERE` to create the SQL segments.
+A `RenderedStatement` always maintains one invariant:
+
+```text
+segments.length === parameters.length + 1
+```
+
+All SQL structure resides in segments, and every parameter is strictly a value. In the example above, there are two segments and one parameter. If all conditions are disabled, there is one segment and zero parameters. Parameters can never be interpreted as identifiers or SQL fragments; for instance, passing `${"x' OR '1'='1"}` simply results in that string becoming a single entry in the parameter array.
+To change the structure, a helper must explicitly insert text into a segment:
+
+```ts
+sql.rows`SELECT id FROM products ORDER BY ${sql.ident("price")} DESC LIMIT ${10}`;
+```
+
+```text
+segments    ['SELECT id FROM products ORDER BY "price" DESC LIMIT ', ""]
+parameters  [10]
+```
+
+`sql.ident` quotes the identifier according to dialect rules and places it in a segment, while `10` remains a parameter. `sql.raw(text)` also inserts text into a segment without quoting. Because these helpers cross the structural boundary, they must never be given external input.
+
+### Why inactive branches require a separate transform
+
+A detail in `query.values` is noteworthy: `maxPrice` is `null`, and if `keyword` were missing, you would see `"%undefined%"`. This is because JavaScript evaluates all `${...}` interpolations before calling the tag function. Since directives are comments, they cannot alter JavaScript's evaluation order.
+
+While harmless when values are discarded, this eager evaluation can lead to crashes:
+
+```ts
+const user: { name: string } | null = null;
+sql.rows`SELECT id FROM users
+  /*@braid where*/
+    /*@braid if ${user != null}*/ AND name = ${user.name} /*@braid end*/
+  /*@braid end*/`;
+// TypeError: Cannot read properties of null (reading 'name')
+```
+
+TypeScript also rejects this code. The `if` directive is a comment and provides no control-flow narrowing, resulting in TS18047 (`'user' is possibly 'null'`) at `user.name`.
+
+To solve this, `@sqlbraid/compiler` identifies templates containing directives and transforms them into a different call structure. The core transformation looks like this:
+```ts
+__sqlbraidCapture(sql.rows<ProductRow>, strings, (__sqlbraidValues) => {
+  const __sqlbraidRead = (index, thunk) => {
+    if (!__sqlbraidEvaluated.has(index)) {
+      __sqlbraidValues[index] = thunk();
+      __sqlbraidEvaluated.add(index);
+    }
+    return __sqlbraidValues[index];
+  };
+  if (__sqlbraidAssertCondition(__sqlbraidRead(0, () => filter.keyword != null))) {
+    __sqlbraidRead(1, () => "%" + filter.keyword + "%");
+  }
+}, templateIr);
+```
+
+Each interpolation is wrapped in a thunk, and the directive structure is replaced by actual `if` statements. This provides three guarantees: first, expressions in inactive branches are never evaluated; second, each expression is evaluated at most once (via a `Set`); and third, since they are now inside real `if` blocks, TypeScript narrowing applies.
+
+Repository tests confirm that when the lowered virtual source is type-checked, TS18047 disappears inside the `user != null` branch, while it correctly remains at the original source location when the condition is an unrelated `enabled` flag.
+
+These guarantees apply only to source processed through the compiler at build time, for example through the Vite integration. The compiler lowers directives; it does not parse SQL.
+
+---
+
+## The boundary between a logical statement and a native driver request
+
+A `RenderedStatement` contains no placeholders. Placeholder syntax is not owned by the dialect, but by the driver adapter's `StatementBindingAdapter`. The following is what `describe()` returns for the PostgreSQL `pg` adapter:
+
+```text
+transport          text-positional
+parameterizedSql   SELECT id, name, price FROM products WHERE name ILIKE $1 ORDER BY id
+reuse              { requested: "auto", effective: "simple", owner: "driver" }
+```
+
+Based on the same segment and parameter arrays, the MySQL adapter produces `?`, the Oracle adapter `:1`, and the SQL Server adapter `@p1` with a typed request. There is also a `native-value-template` transport for drivers that accept a tagged template directly. The logical statement's shape remains identical regardless of the transport.
+
+The sequence is fixed: `describe()` is a pure function and runs **before any connection is acquired**. If a parameter hint is incorrect or the adapter does not support the binding, the call fails without consuming a single pool lease. Once a connection is acquired, SQLBraid verifies that the lease's `statementBinding` matches the adapter that created the description. If not, the lease is discarded and the call is rejected, preventing placeholder SQL built under one set of rules from being sent to the wrong driver.
+
+### What `db.prepare()` actually locks: Logical Shape Lock
+
+The `reuse` field relates to prepared statements. Rereading the `db.prepare()` example in the README, I questioned whether this API was necessary, as bind variables are captured from the lexical scope regardless.
+
+In practice, plain functions produced the same binding; `searchProducts()` is an example. Consequently, I redefined the role of `prepare` as a **Logical Shape Lock**. `db.prepare()` remembers the result kind, dialect, segments, and parameter metadata from the first execution and rejects any subsequent execution whose structure changes, prior to any driver I/O.
+
+```ts
+const prepared = db.prepare("search", (f: ProductFilter) => searchProducts(f));
+await prepared.all({ keyword: "lamp" });
+await prepared.all({ keyword: "lamp", maxPrice: 1 });
+// BRAID_PREPARED_SHAPE: Prepared query search changed its rendered structure.
+```
+
+If a directive changes a branch, the segments change, so the example cannot keep one prepared shape across both calls. Shape locking is separate from server-side prepared statement reuse. The `pg` adapter reports `effective: "simple"` even when it receives `requested: "reuse"`, and executes `client.query({ text, values })` each time. I removed the README's claim that `prepare` improves performance and clarified that the adapter determines whether reuse occurs.
+
+## When the connection is released: between execution and result mapping
+
+The remaining path depends on what `db` wraps:
+
+- `createPgDatabase(client)`: A **direct executor** wrapping a single, already connected physical client. SQLBraid serializes access to this client but does not own its termination.
+- `createPgPoolDatabase(pool)`: Wraps a `ConnectionProvider`. The provider lends physical connections, and each borrowed connection is a `ConnectionLease`.
+
+Sending queries to the same pool does not imply they use the same connection. In this run, three concurrent queries through the same `db` used different PostgreSQL backend pids:
+
+```text
+db.one(pid) × 3 (concurrent)      → ["85", "84", "86"]
+db.session(s => s.one(pid) × 3) → ["86", "86", "86"]
+```
+
+A single `db.all()` on a pool follows this runtime sequence:
+
+1. **Render + Binding Describe**: Performed without a connection.
+2. **Provider Acquire**: Lease acquisition.
+3. **Executor Query**: Driver I/O → value normalization via TypePolicy → row materialization.
+4. **Lease Release**: Connection returned to the pool.
+5. **Result-kind Check**: Fails if a `rows` query returns a `command` result.
+6. **Standard Schema Mapping**: Application-level validation and transformation.
+
+A comment in `runPrepared()` explains this order:[^materialized]
+
+[^materialized]: `runPrepared()`: https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/materialized.ts#L263-L307
+
+```ts
+// Materialize and release before Standard Schema mapping so pooled connections are not held during application code.
+const raw = await physical(operation, use!, executionOptions);
+...
+await use!.release(isPoisoned(use!.physicalState));
+```
+
+By the time `db.all()` returns, the entire result set is in memory. Since schema validation can be asynchronous and application logic may be slow, there is no reason to hold a limited pool connection. Logging the pool state within the schema's `validate` method confirms that the connection is already idle during mapping:
+
+```text
+query:ready → query:result → map(total=1, idle=1) ×3 → query:mapped
+```
+
+This sequence applies to root operations on a pool. Within a transaction or session, `release()` does not return the lease but merely frees the execution slot; the connection is returned once when the scope ends.
+
+Note that the result-kind check occurs after I/O. If a query declared as `sql.rows` contains DML, the mismatch is only discovered after execution. This check cannot prevent side effects.
+
+### Value normalization and application mapping are separate layers
+
+For the pool root operation above, TypePolicy runs during driver I/O and Standard Schema mapping runs after the lease is returned. The two layers have different jobs:
+
+- **TypePolicy** converts what the driver hands back into SQLBraid's canonical JavaScript representation: exact integers and decimals as strings, IEEE approximations as numbers.
+- **Standard Schema** converts that canonical representation into your application's types. Turning a decimal string into a `Decimal` or `Money` object happens here.
+
+TypePolicy must preserve precision before application mapping begins. Consider a row with id `9007199254740993` and a `numeric(20,2)` price of `12345678901234567.89`:
+
+```text
+{ id: "9007199254740993", name: "big id lamp", price: "12345678901234567.89" }
+Number("9007199254740993") → 9007199254740992
+```
+
+For exact numeric OIDs, the `pg` adapter overrides the driver's type parser with a string parser, so those values are never turned into numbers in the first place. Once a value has been rounded into a number, converting it back to a string doesn't recover the lost digits. That's why this conversion can't be done in the mapping layer.
+
+Each driver and profile needs its own evidence for this policy. For example, Bun.SQL's MySQL/MariaDB DECIMAL values are rejected unless you cast them to text in SQL, and SQLite's native decimal isn't supported. Numbers inside JSON and the precision of native `Date` values are separate profile concerns. The per-combination coverage is in the [data representation docs](https://clickin.github.io/SQLBraid/latest/concepts/data-representation/) and the [limitations](https://clickin.github.io/SQLBraid/latest/release/limitations/).
+
+---
+
+## Sessions and transactions change who owns the physical resource
+
+A materialized root operation on a pool borrows a lease for the query and returns it after reading the result, before application mapping. `session` and `tx` keep the lease for the callback's scope instead.
+
+```d2
+direction: down
+
+pool: "Pool (ConnectionProvider)"
+
+root: "Root operation" {
+  op: "acquire a lease per query"
+  rel: "return after materialize\nbefore mapping"
+  op -> rel
+}
+
+tx: "db.tx() scope" {
+  lease: "one lease pinned"
+  sp: "nested tx.tx()\n= SAVEPOINT"
+  lease -> sp: "same connection"
+}
+
+stream: "db.stream()" {
+  cur: "cursor open"
+  close: "return after iterator closes"
+  cur -> close
+}
+
+pool -> root.op: "acquire"
+pool -> tx.lease: "acquire"
+pool -> stream.cur: "acquire"
+tx.lease -> stream.cur: "a stream inside tx\nuses the same connection" {
+  style.stroke-dash: 3
+}
+```
+
+`db.session(callback)` pins one lease for the callback without starting a transaction. This explains the repeated pid in the session example above. Use a session for connection-level settings or temporary tables when you need the same connection but not a transaction.
+
+`db.tx(callback)` runs `BEGIN`, your callback, and then `COMMIT` or `ROLLBACK`, all on one connection. Calling `tx.tx()` inside it doesn't start an independent transaction. It's a savepoint on the same connection, which is why nested calls can't take options such as isolation (`BRAID_TX_OPTIONS_NESTED`).
+
+Keeping savepoints and callback scopes intact means stopping handles from being mixed up:
+
+```ts
+await db.tx(async (tx) => {
+  await tx.tx(async (inner) => {
+    await tx.all(searchProducts({}));
+    // BRAID_TX_SCOPE: Use the innermost transaction database while its savepoint is active.
+  });
+});
+
+let escaped;
+await db.tx(async (tx) => { escaped = tx; });
+await escaped.all(searchProducts({}));
+// BRAID_TX_CLOSED: Transaction database is no longer usable.
+```
+
+While a savepoint is active, SQLBraid requires queries to use the innermost transaction handle. The outer `tx` is rejected with `BRAID_TX_SCOPE`. After the callback ends, its handle is rejected with `BRAID_TX_CLOSED`; redirecting it to another connection would run code that expected atomicity outside the original transaction.
+
+### When the `COMMIT` response says `ROLLBACK`
+
+The previous post's failed transaction shows why callback completion alone is not enough:
+
+```ts
+await db.tx(async (tx) => {
+  await tx.execute(sql.command`INSERT INTO audit (note) VALUES (${"first"})`);
+  try {
+    await tx.execute(sql.command`INSERT INTO missing_table VALUES (1)`);
+  } catch {
+    // relation "missing_table" does not exist
+  }
+  return "ok";
+});
+```
+
+The `missing_table` error puts the PostgreSQL transaction into the aborted state. The callback returns normally. The runtime checks that no stream is still open, then calls the adapter's `commit()`. With `pg`, that `COMMIT` completes without an exception and the result's `command` is `"ROLLBACK"`. So the adapter's transaction-control function inspects the response itself:[^pg-commit]
+
+[^pg-commit]: `runControl` in `createPgExecutor()`: https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/postgres/src/pg.ts#L699-L707
+
+```ts
+const runControl = async (text: string): Promise<void> => {
+  const result = await client.query({ text, values: [] });
+  if (text === "COMMIT" && result.command !== undefined && result.command !== "COMMIT") {
+    throw new AdapterError(
+      "BRAID_TX_NOT_COMMITTED",
+      `PostgreSQL COMMIT completed with ${result.command}, not COMMIT.`,
+    );
+  }
+};
+```
+
+From there, the runtime's `tx()` decides what happens:
+
+```text
+callback returns normally
+  → confirm the scope has no open streams
+  → run commit control → BRAID_TX_NOT_COMMITTED
+  → control failed: mark the physical state as poisoned
+  → catch: poisoned, so don't send ROLLBACK again
+  → finally: return the pooled lease with discard
+  → db.tx() rejects with BRAID_TX_NOT_COMMITTED
+```
+
+SQLBraid treats an unexpected `COMMIT` response as a transaction-control failure and marks the connection as `poisoned`. For the `"ROLLBACK"` response above, the transaction did not commit. The runtime still follows its control-failure policy: release a pooled lease with `release({ discard: true })`, or reject further work on a direct executor with `BRAID_CONNECTION_POISONED`. It does not send another `ROLLBACK` to try to recover the connection.
+
+Run this against a real PostgreSQL and `db.tx()` fails with `BRAID_TX_NOT_COMMITTED`, and the `audit` table has zero rows. The repository's contract test reproduces the same situation with fixtures on three paths: `pg` direct, `pg` pool and Bun.SQL PostgreSQL. It checks that `COMMIT` was called exactly once, that the pooled lease was then returned once with discard, and that the direct connection never reaches another control I/O.[^contract-test]
+
+[^contract-test]: `transaction.commit-terminal-outcome` contract test: https://github.com/Clickin/SQLBraid/blob/v1.0.2/tests/contract-controls.test.ts#L444-L469
+
+### A contrasting case: Oracle `autoCommit`
+
+Oracle has a different way to break the same transaction boundary. `node-oracledb` accepts `autoCommit` globally or per call. If statements inside a SQLBraid-managed transaction inherit `autoCommit: true`, each statement commits on its own. A later `db.tx()` rollback cannot undo those commits.
+
+The Oracle adapter overrides the execution options with `autoCommit: false`, but only while a transaction is active:[^oracle]
+
+[^oracle]: `resolveExecuteOptions()`: https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/oracle/src/oracledb.ts#L850-L872
+
+```ts
+return {
+  ...customOptions,
+  ...(transactionActive ? { autoCommit: false } : {}),
+  ...
+};
+```
+
+Outside a managed transaction, the adapter preserves the user's options. Inside one, SQLBraid controls commit and rollback, so the driver must not commit individual statements.
+
+---
+
+## A stream owns its connection until iteration ends
+
+Unlike `db.all()`, `db.stream()` hands you rows before the whole result has been read. On PostgreSQL, a `pg-cursor` cursor has to stay open on the connection to read the next row. So a stream can't return its lease until iteration ends, and schema mapping runs per row while the connection is still held.
+
+Here's what happens when the consumer stops partway:
+
+```ts
+for await (const row of db.stream(searchProducts({ keyword: "lamp" }))) {
+  // pool here: total=1, idle=0
+  break;
+}
+// pool after break: total=1, idle=1
+```
+
+`break` calls the async generator's `return()`, and SQLBraid's stream function starts cleanup in its `finally` block:[^stream]
+[^stream]: Stream cleanup path: https://github.com/Clickin/SQLBraid/blob/v1.0.2/packages/runtime/src/operations/stream.ts#L249-L327
+
+```ts
+} finally {
+  // Iterator cleanup runs before lease release so driver cursors/portals still have their owning connection.
+  if (iterator?.return) {
+    try {
+      await physicalContext.run(activeContext, () => iterator!.return!());
+    } catch (error) {
+      streamError = streamFailed
+        ? new AggregateError([streamError, error], "Stream iterator cleanup failed.", { cause: streamError })
+        : error;
+      streamFailed = true;
+      poison(use!.physicalState, streamError);
+    }
+  }
+  ...
+  await use!.release(isPoisoned(use!.physicalState));
+}
+```
+
+The driver iterator's `return()` closes the cursor before the lease is returned. Reversing that order would let another request acquire the connection while cleanup for the previous cursor is still being sent on it.
+
+The same code shows how failures are handled. If reading rows fails and then cleanup fails too, both errors are wrapped in an `AggregateError` with the original failure as its `cause`. The cleanup error never hides the original one. A connection whose cleanup failed is marked as poisoned, and a discard flag is passed to `release()`. The repository has separate tests checking that on an early return the native resource closes before the pool lease, and that the lease is discarded when cleanup fails.
+
+### Close the stream before changing transaction scope
+
+A stream inside a transaction uses the transaction's connection. If you create a savepoint on that connection while the cursor is still open, how the open cursor and the savepoint interact differs between drivers or is simply undefined. SQLBraid rejects the combination:
+
+```ts
+await db.tx(async (tx) => {
+  for await (const _ of tx.stream(searchProducts({}))) {
+    await tx.tx(async () => {});
+    // BRAID_STREAM_SCOPE: Close the pinned stream before opening a transaction or savepoint.
+  }
+});
+```
+
+If a `tx` or `session` callback ends while a stream is still open, SQLBraid closes the stream and then fails with `BRAID_STREAM_SCOPE`.
+
+An adapter could imitate streaming by reading the whole result into memory before yielding rows. That would keep the API shape but lose incremental reading. SQLBraid does not use this fallback: the libSQL adapter rejects `db.stream()` with `BRAID_STREAM_UNSUPPORTED`.
+
+---
+
+## One API doesn't mean the same native features
+
+That stream rejection is a rule across all of SQLBraid. When an adapter can't physically provide a feature, it fails with an explicit error instead of buffering, emulating or silently degrading. Pass an active `AbortSignal` to a driver that can't cancel and you get `BRAID_CANCEL_UNSUPPORTED` before any I/O. Call a nested `tx` on a resource without savepoints and you get `BRAID_TX_UNSUPPORTED`. Support is recorded in the [support matrix, per database, driver and runtime](https://clickin.github.io/SQLBraid/latest/reference/support/).
+
+Here's the path we've followed, split by responsibility:
+
+| Where on the path | Owner | Rule it keeps |
+|---|---|---|
+| `sql` tag, `render()` | authoring/template | Interpolation is a value, structure needs a helper, segments = parameters + 1 |
+| `StatementBindingAdapter.describe()` | binding/adapter | Adapter owns placeholders and transport; runs purely, before any connection |
+| Lease acquire/release, `session`/`tx`/`stream` | lifecycle/runtime | Materialized pool root operations release before mapping; sessions and transactions pin a connection; streams clean up before release; poisoned connections are discarded |
+| Result normalization in the executor | adapter + TypePolicy | Exact values become strings at the driver stage |
+| Standard Schema | application mapping | Converts canonical values to application types; runs after release for materialized pool root operations, but while the connection is held for streams and pinned scopes |
+
+The compiler, metadata, codegen and LSP aren't in that table, and the runtime doesn't depend on them. The compiler only does the directive lowering shown above, at build time. Metadata and codegen are optional tools that turn table information read from the database into TypeScript models. The rules on the execution path have to hold just the same without any of them.
+
+SQLBraid keeps common rules for value binding, result-kind checks, connection lifetimes, and failed transaction control. It does not make placeholder syntax, transport, precision handling, or native feature support identical across adapters. I could have hidden those differences behind the common API. But the `COMMIT` response and cursor cleanup examples show why the execution path must account for them.
+
